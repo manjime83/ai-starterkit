@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.4.0",
   "scripts": {
     "dev": "next dev",
-    "dev:all": "concurrently --names \"next,studio\" \"pnpm dev\" \"pnpm db:studio\"",
+    "dev:all": "concurrently --names \"next,studio,polar\" \"pnpm dev\" \"pnpm db:studio\" \"pnpm polar:webhook\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -17,8 +17,8 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
     "email:dev": "email dev src/emails",
-    "polar:webhook": "ngrok http 3000",
-    "auth:generate": "better-auth generate --output src/db/schema/auth.ts -y",
+    "polar:webhook": "ngrok http --url=assuring-anemone-positive.ngrok-free.app 3000",
+    "auth:generate": "better-auth generate --output src/db/schema/auth.ts --yes",
     "test": "tsx src/scripts/test.ts"
   },
   "dependencies": {
@@ -58,6 +58,7 @@
     "@types/nodemailer": "^8.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "auth": "^1.6.18",
     "concurrently": "^10.0.3",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9.39.4",
