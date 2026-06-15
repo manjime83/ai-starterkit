@@ -1,0 +1,19 @@
+# dependencies
+node_modules
+.pnp
+.pnp.*
+
+# build output
+.next
+out
+build
+coverage
+
+# misc
+*.tsbuildinfo
+next-env.d.ts
+pnpm-lock.yaml
+
+# generated
+src/db/schema/auth.ts
+src/db/migrations
