@@ -2,6 +2,7 @@
   "name": "ai-starterkit",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.4.0",
   "scripts": {
     "dev": "next dev",
     "dev:all": "concurrently --names \"next,studio\" \"pnpm dev\" \"pnpm db:studio\"",
