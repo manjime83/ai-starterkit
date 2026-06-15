@@ -6,7 +6,7 @@ import { authActionClient } from "@/lib/safe-action";
 import { and, eq, not } from "drizzle-orm";
 import { toggleTodoSchema } from "../schemas";
 
-export const toggleTodo = authActionClient.schema(toggleTodoSchema).action(async ({ parsedInput, ctx }) => {
+export const toggleTodo = authActionClient.inputSchema(toggleTodoSchema).action(async ({ parsedInput, ctx }) => {
   const [todo] = await db
     .update(todos)
     .set({ completed: not(todos.completed) })

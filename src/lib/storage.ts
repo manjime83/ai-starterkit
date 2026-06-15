@@ -12,6 +12,7 @@ const s3 = env.AWS_S3_BUCKET_NAME
   ? new S3Client({
       endpoint: env.AWS_ENDPOINT_URL,
       region: env.AWS_DEFAULT_REGION,
+      forcePathStyle: false,
       credentials: {
         accessKeyId: env.AWS_ACCESS_KEY_ID!,
         secretAccessKey: env.AWS_SECRET_ACCESS_KEY!,
