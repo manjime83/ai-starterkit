@@ -1,7 +1,7 @@
 import { db } from "@/db";
-import { subscriptions } from "@/db/schema";
 import { MagicLinkEmail } from "@/emails/magic-link";
 import { env } from "@/env";
+import { upsertSubscription } from "@/features/subscriptions";
 import { sendEmail } from "@/lib/email";
 import { getBaseUrl } from "@/lib/utils";
 import { init } from "@paralleldrive/cuid2";
@@ -10,7 +10,6 @@ import { Polar } from "@polar-sh/sdk";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { magicLink } from "better-auth/plugins";
-import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { cache } from "react";
@@ -43,46 +42,46 @@ export const auth = betterAuth({
             client: polarClient,
             createCustomerOnSignUp: true,
             use: [
-              checkout({ successUrl: `${getBaseUrl()}/dashboard/settings?checkout=success` }),
+              checkout({
+                products: [{ productId: env.POLAR_PRODUCT_ID ?? "", slug: "pro" }],
+                successUrl: `${getBaseUrl()}/dashboard/settings?checkout=success`,
+              }),
               portal({ returnUrl: `${getBaseUrl()}/dashboard/settings` }),
               webhooks({
                 secret: env.POLAR_WEBHOOK_SECRET ?? "",
-                onSubscriptionCreated: async (payload) => {
-                  await db.insert(subscriptions).values({
-                    userId: payload.data.metadata?.userId as string,
-                    polarSubscriptionId: payload.data.id,
-                    status: payload.data.status,
+                onPayload: async (payload) => {
+                  switch (payload.type) {
+                    case "subscription.created":
+                    case "subscription.updated":
+                    case "subscription.active":
+                    case "subscription.canceled":
+                    case "subscription.uncanceled":
+                    case "subscription.revoked":
+                      break;
+                    default:
+                      return;
+                  }
+
+                  const subscription = payload.data;
+                  const userId = subscription.customer.externalId;
+                  if (!userId) return;
+
+                  await upsertSubscription({
+                    userId,
+                    polarCustomerId: subscription.customerId,
+                    polarSubscriptionId: subscription.id,
+                    polarProductId: subscription.productId,
+                    status: subscription.status,
+                    periodStart: subscription.currentPeriodStart,
+                    periodEnd: subscription.currentPeriodEnd,
+                    cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+                    cancelAt: subscription.cancelAtPeriodEnd ? subscription.currentPeriodEnd : null,
+                    canceledAt: subscription.canceledAt,
+                    endedAt: subscription.endedAt,
+                    seats: subscription.seats,
+                    trialStart: subscription.trialStart,
+                    trialEnd: subscription.trialEnd,
                   });
-                },
-                onSubscriptionUpdated: async (payload) => {
-                  await db
-                    .update(subscriptions)
-                    .set({ status: payload.data.status, updatedAt: new Date() })
-                    .where(eq(subscriptions.polarSubscriptionId, payload.data.id));
-                },
-                onSubscriptionActive: async (payload) => {
-                  await db
-                    .update(subscriptions)
-                    .set({ status: "active", canceledAt: null, updatedAt: new Date() })
-                    .where(eq(subscriptions.polarSubscriptionId, payload.data.id));
-                },
-                onSubscriptionUncanceled: async (payload) => {
-                  await db
-                    .update(subscriptions)
-                    .set({ status: "active", canceledAt: null, updatedAt: new Date() })
-                    .where(eq(subscriptions.polarSubscriptionId, payload.data.id));
-                },
-                onSubscriptionCanceled: async (payload) => {
-                  await db
-                    .update(subscriptions)
-                    .set({ status: "canceled", canceledAt: new Date(), updatedAt: new Date() })
-                    .where(eq(subscriptions.polarSubscriptionId, payload.data.id));
-                },
-                onSubscriptionRevoked: async (payload) => {
-                  await db
-                    .update(subscriptions)
-                    .set({ status: "revoked", updatedAt: new Date() })
-                    .where(eq(subscriptions.polarSubscriptionId, payload.data.id));
                 },
               }),
             ],

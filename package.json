@@ -20,7 +20,7 @@
     "email:dev": "email dev src/emails",
     "polar:webhook": "ngrok http --url=assuring-anemone-positive.ngrok-free.app 3000",
     "auth:generate": "better-auth generate --output src/db/schema/auth.ts --yes",
-    "test": "tsx src/scripts/test.ts"
+    "test": "tsx --env-file=.env src/scripts/test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1068.0",

@@ -8,6 +8,13 @@
       "when": 1781492533936,
       "tag": "0000_low_shard",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781504748008,
+      "tag": "0001_abnormal_nuke",
+      "breakpoints": true
     }
   ]
 }
