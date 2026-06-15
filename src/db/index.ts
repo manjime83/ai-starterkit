@@ -7,9 +7,7 @@ function createDb() {
   return drizzle(postgres(env.DATABASE_URL), { schema });
 }
 
-type DB = ReturnType<typeof createDb>;
-
-const globalForDb = globalThis as unknown as { db: DB };
+const globalForDb = globalThis as unknown as { db: ReturnType<typeof createDb> };
 
 export const db = globalForDb.db ?? createDb();
 
