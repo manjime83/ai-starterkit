@@ -12,8 +12,8 @@ async function main() {
     console.log("✓ Storage");
   }
 
-  if (env.POLAR_ACCESS_TOKEN) {
-    console.log("✓ Polar (token present)");
+  if (env.STRIPE_SECRET_KEY) {
+    console.log("✓ Stripe (secret key present)");
   }
 
   console.log("\nAll checks passed.");

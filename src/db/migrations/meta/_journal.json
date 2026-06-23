@@ -15,6 +15,13 @@
       "when": 1781504748008,
       "tag": "0001_abnormal_nuke",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782171235566,
+      "tag": "0002_curious_meteorite",
+      "breakpoints": true
     }
   ]
 }

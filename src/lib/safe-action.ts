@@ -13,6 +13,8 @@ export const authActionClient = actionClient.use(async ({ next }) => {
 
 export const proActionClient = authActionClient.use(async ({ next, ctx }) => {
   const subscription = await getSubscription(ctx.user.id);
-  if (subscription?.status !== "active") throw new Error("Pro subscription required");
+  if (subscription?.status !== "active" && subscription?.status !== "trialing") {
+    throw new Error("Pro subscription required");
+  }
   return next({ ctx: { ...ctx, subscription } });
 });

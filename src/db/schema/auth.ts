@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { boolean, index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -7,6 +7,7 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").default(false).notNull(),
   image: text("image"),
+  stripeCustomerId: text("stripe_customer_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at")
     .defaultNow()
@@ -71,6 +72,30 @@ export const verifications = pgTable(
       .notNull(),
   },
   (table) => [index("verifications_identifier_idx").on(table.identifier)],
+);
+
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: text("id").primaryKey(),
+    plan: text("plan").notNull(),
+    referenceId: text("reference_id").notNull(),
+    stripeCustomerId: text("stripe_customer_id"),
+    stripeSubscriptionId: text("stripe_subscription_id"),
+    status: text("status").notNull().default("incomplete"),
+    periodStart: timestamp("period_start"),
+    periodEnd: timestamp("period_end"),
+    trialStart: timestamp("trial_start"),
+    trialEnd: timestamp("trial_end"),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false),
+    cancelAt: timestamp("cancel_at"),
+    canceledAt: timestamp("canceled_at"),
+    endedAt: timestamp("ended_at"),
+    seats: integer("seats"),
+    billingInterval: text("billing_interval"),
+    stripeScheduleId: text("stripe_schedule_id"),
+  },
+  (table) => [index("subscriptions_referenceId_idx").on(table.referenceId)],
 );
 
 export const usersRelations = relations(users, ({ many }) => ({

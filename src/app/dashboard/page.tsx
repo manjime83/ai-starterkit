@@ -25,7 +25,7 @@ export default async function DashboardPage() {
         </CardHeader>
         <CardContent className="flex items-center gap-4">
           <Badge variant={subscribed ? "default" : "secondary"}>{subscribed ? "Pro" : "Free"}</Badge>
-          {!subscribed && <CheckoutButton productId={env.POLAR_PRODUCT_ID} />}
+          {!subscribed && <CheckoutButton configured={!!env.STRIPE_PRICE_ID} />}
         </CardContent>
       </Card>
     </div>

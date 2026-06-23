@@ -5,17 +5,24 @@ import { authClient } from "@/lib/auth-client";
 import { useState } from "react";
 import { toast } from "sonner";
 
-export function CheckoutButton({ productId }: { productId?: string }) {
+export function CheckoutButton({ configured = true }: { configured?: boolean }) {
   const [loading, setLoading] = useState(false);
 
   async function handleCheckout() {
-    if (!productId) {
+    if (!configured) {
       toast.error("Billing is not configured");
       return;
     }
     setLoading(true);
-    await authClient.checkout({ products: productId });
-    setLoading(false);
+    const { error } = await authClient.subscription.upgrade({
+      plan: "pro",
+      successUrl: "/dashboard/settings?checkout=success",
+      cancelUrl: "/dashboard/settings",
+    });
+    if (error) {
+      toast.error(error.message ?? "Something went wrong");
+      setLoading(false);
+    }
   }
 
   return (

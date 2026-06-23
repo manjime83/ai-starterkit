@@ -37,7 +37,7 @@ export default async function SettingsPage() {
         </CardHeader>
         <CardContent className="flex items-center gap-4">
           <Badge variant={subscribed ? "default" : "secondary"}>{subscribed ? "Pro" : "Free"}</Badge>
-          {subscribed ? <ManageSubscriptionButton /> : <CheckoutButton productId={env.POLAR_PRODUCT_ID} />}
+          {subscribed ? <ManageSubscriptionButton /> : <CheckoutButton configured={!!env.STRIPE_PRICE_ID} />}
         </CardContent>
       </Card>
     </div>

@@ -9,7 +9,7 @@
 | Framework       | Next.js 16 (App Router, standalone output)        | 16      |
 | UI              | shadcn v4 (`@base-ui/react`) + Tailwind CSS v4    | latest  |
 | Database ORM    | Drizzle ORM + postgres.js                         | latest  |
-| Auth            | better-auth + Polar plugin                        | latest  |
+| Auth            | better-auth + Stripe plugin                       | latest  |
 | Server Actions  | next-safe-action v8 + Zod v4                      | latest  |
 | Forms           | react-hook-form + @hookform/resolvers v5          | latest  |
 | ID generation   | @paralleldrive/cuid2                              | latest  |
@@ -28,8 +28,7 @@
 ## Step 1 — Create Next.js App
 
 ```bash
-pnpx create-next-app@latest . \
-  --typescript --tailwind --eslint --app --src-dir --yes
+pnpx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --yes
 ```
 
 ## Step 2 — Install Production Dependencies
@@ -38,7 +37,7 @@ pnpx create-next-app@latest . \
 pnpm add \
   drizzle-orm postgres zod \
   next-safe-action react-hook-form @hookform/resolvers \
-  better-auth @polar-sh/better-auth @polar-sh/sdk \
+  better-auth @better-auth/stripe stripe \
   @t3-oss/env-nextjs \
   @paralleldrive/cuid2 \
   next-themes \
@@ -165,10 +164,10 @@ EMAIL_SERVER_PORT="1025"
 EMAIL_SERVER_USER=""
 EMAIL_SERVER_PASSWORD=""
 
-# Optional — Polar billing. Leave blank to disable the billing layer entirely.
-POLAR_ACCESS_TOKEN=""
-POLAR_WEBHOOK_SECRET=""
-POLAR_PRODUCT_ID=""
+# Optional — Stripe billing. Leave blank to disable the billing layer entirely.
+STRIPE_SECRET_KEY=""
+STRIPE_WEBHOOK_SECRET=""
+STRIPE_PRICE_ID=""
 
 # Optional — object storage (Railway Bucket). Leave blank if the project doesn't need file uploads.
 AWS_ENDPOINT_URL="https://storage.railway.app"
@@ -187,7 +186,7 @@ AWS_SECRET_ACCESS_KEY=""
 
 Validate all env vars with Zod v4. Use `z.url()` and `z.email()` directly (not `z.string().url()` — deprecated in Zod v4).
 
-Mark Polar and AWS vars as optional — they are runtime-guarded and their absence disables the feature:
+Mark Stripe and AWS vars as optional — they are runtime-guarded and their absence disables the feature:
 
 ```ts
 // Required
@@ -202,10 +201,10 @@ EMAIL_SERVER_PORT: z.string(),
 EMAIL_SERVER_USER: z.string().optional(),
 EMAIL_SERVER_PASSWORD: z.string().optional(),
 
-// Optional — Polar
-POLAR_ACCESS_TOKEN: z.string().optional(),
-POLAR_WEBHOOK_SECRET: z.string().optional(),
-POLAR_PRODUCT_ID: z.string().optional(),
+// Optional — Stripe
+STRIPE_SECRET_KEY: z.string().optional(),
+STRIPE_WEBHOOK_SECRET: z.string().optional(),
+STRIPE_PRICE_ID: z.string().optional(),
 
 // Optional — object storage
 AWS_ENDPOINT_URL: z.url().optional(),
@@ -239,7 +238,7 @@ src/
       data/          ← Drizzle queries
       schemas.ts     ← shared Zod schemas (used by both actions and forms)
       index.ts       ← barrel export (ui + data + schemas)
-    subscriptions/   ← subscription gating (always present when Polar is enabled)
+    subscriptions/   ← subscription gating (always present when Stripe is enabled)
       data/          ← getSubscription + isSubscribed queries
       index.ts
   components/ui/     ← shadcn components
@@ -256,7 +255,7 @@ src/
       layout.tsx     ← renders AppSidebar + SidebarInset (no auth check — pages handle it)
       page.tsx       ← welcome card + subscription status card
       todos/         ← todos feature page (demo — delete when done)
-      settings/      ← account info + billing (plan badge + Polar checkout/portal)
+      settings/      ← account info + billing (plan badge + Stripe checkout/portal)
     sign-in/         ← Google OAuth button + magic link email input
     page.tsx         ← minimal home page: APP_NAME h1, tagline, session-aware CTA button
 ```
@@ -277,8 +276,9 @@ Split into two files:
 
 - Use **plural** table names: `users`, `sessions`, `accounts`, `verifications`
 - This is required by `usePlural: true` in the drizzle adapter
+- The `@better-auth/stripe` plugin owns the `subscriptions` table and adds a `stripeCustomerId` column to `users`. Both live here (the plugin's schema is part of better-auth's generated output).
 
-**`src/db/schema/app.ts`** — application tables (todos, subscriptions):
+**`src/db/schema/app.ts`** — application tables (todos):
 
 - Use `@paralleldrive/cuid2` for IDs: `.$defaultFn(() => createId())`
 
@@ -299,22 +299,32 @@ export const todos = pgTable("todos", {
 });
 ```
 
-Subscriptions table:
+Subscriptions table (managed by `@better-auth/stripe` — **do not hand-edit**, regenerate with `pnpm auth:generate`). The plugin keeps it in sync from Stripe webhooks. `referenceId` holds the user id (or org id):
 
 ```ts
-export const subscriptions = pgTable("subscriptions", {
-  id: text("id")
-    .primaryKey()
-    .$defaultFn(() => createId()),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  polarSubscriptionId: text("polar_subscription_id").notNull().unique(),
-  status: text("status").notNull(), // active | canceled | revoked
-  canceledAt: timestamp("canceled_at"),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: text("id").primaryKey(),
+    plan: text("plan").notNull(),
+    referenceId: text("reference_id").notNull(),
+    stripeCustomerId: text("stripe_customer_id"),
+    stripeSubscriptionId: text("stripe_subscription_id"),
+    status: text("status").notNull().default("incomplete"), // active | trialing | canceled | incomplete | ...
+    periodStart: timestamp("period_start"),
+    periodEnd: timestamp("period_end"),
+    trialStart: timestamp("trial_start"),
+    trialEnd: timestamp("trial_end"),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false),
+    cancelAt: timestamp("cancel_at"),
+    canceledAt: timestamp("canceled_at"),
+    endedAt: timestamp("ended_at"),
+    seats: integer("seats"),
+    billingInterval: text("billing_interval"),
+    stripeScheduleId: text("stripe_schedule_id"),
+  },
+  (table) => [index("subscriptions_referenceId_idx").on(table.referenceId)],
+);
 ```
 
 **`src/db/schema/index.ts`** — re-exports both
@@ -342,7 +352,7 @@ import { toNextJsHandler } from "better-auth/next-js";
 export const { GET, POST } = toNextJsHandler(auth);
 ```
 
-> All auth routes — Google OAuth callbacks, magic link verification, Polar webhooks — go through this single catch-all.
+> All auth routes — Google OAuth callbacks, magic link verification, Stripe webhooks (`/api/auth/stripe/webhook`) — go through this single catch-all.
 
 ## Step 15 — better-auth (`src/lib/auth.ts`)
 
@@ -352,11 +362,11 @@ Key configuration:
 
 ```ts
 import { init } from "@paralleldrive/cuid2";
-import { Polar } from "@polar-sh/sdk";
-import { checkout, polar, portal, webhooks } from "@polar-sh/better-auth";
+import { stripe } from "@better-auth/stripe";
 import { magicLink } from "better-auth/plugins";
+import Stripe from "stripe";
 
-const polarClient = env.POLAR_ACCESS_TOKEN ? new Polar({ accessToken: env.POLAR_ACCESS_TOKEN }) : null;
+const stripeClient = env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET ? new Stripe(env.STRIPE_SECRET_KEY) : null;
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, { provider: "pg", usePlural: true }),
@@ -374,42 +384,26 @@ export const auth = betterAuth({
         /* send email */
       },
     }),
-    ...(polarClient
+    ...(stripeClient
       ? [
-          polar({
-            client: polarClient,
+          stripe({
+            stripeClient,
+            stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET ?? "",
             createCustomerOnSignUp: true,
-            use: [
-              checkout({ successUrl: `${getBaseUrl()}/dashboard/settings?checkout=success` }),
-              portal({ returnUrl: `${getBaseUrl()}/dashboard/settings` }),
-              webhooks({
-                secret: env.POLAR_WEBHOOK_SECRET ?? "",
-                onSubscriptionCreated: async (payload) => {
-                  /* insert to subscriptions */
-                },
-                onSubscriptionUpdated: async (payload) => {
-                  /* update */
-                },
-                onSubscriptionActive: async (payload) => {
-                  /* set active, clear canceledAt */
-                },
-                onSubscriptionUncanceled: async (payload) => {
-                  /* set active, clear canceledAt */
-                },
-                onSubscriptionCanceled: async (payload) => {
-                  /* set canceled */
-                },
-                onSubscriptionRevoked: async (payload) => {
-                  /* set revoked */
-                },
-              }),
-            ],
+            subscription: {
+              enabled: true,
+              plans: [{ name: "pro", priceId: env.STRIPE_PRICE_ID ?? "" }],
+            },
           }),
         ]
       : []),
   ],
 });
 ```
+
+> The plugin handles checkout, the Stripe billing portal, **and** webhook persistence to the `subscriptions` table for you — no manual webhook handler. It mounts its own webhook endpoint at `/api/auth/stripe/webhook` (under the better-auth catch-all).
+> `createCustomerOnSignUp: true` creates a Stripe customer on every new sign-up and stores its id on `users.stripeCustomerId`.
+> Add a plan to the `plans` array for each Stripe Price you sell. `name` ("pro") is what the client passes to `subscription.upgrade({ plan })`.
 
 Also export `verifySession` from `src/lib/auth.ts` for use in dashboard pages:
 
@@ -428,23 +422,21 @@ export const verifySession = cache(async () => {
 > `cache()` deduplicates the session call within a single render — multiple pages/components can call `verifySession()` with only one DB hit.
 > The dashboard layout does **not** call `verifySession`. Each protected page calls it directly.
 
-> `onSubscriptionActive` fires when a subscription becomes active (e.g. after trial).
-> `onSubscriptionUncanceled` fires when a user reverses a cancellation.
-> Use typed individual handlers (not `onPayload`) — they are fully typed per event.
-> Checkout success redirects to `/dashboard/settings?checkout=success`.
+> The plugin's webhook updates `status` to `active`, `trialing`, `canceled`, etc. — query it via `getSubscription` / `isSubscribed` (see Step 14g).
+> Checkout success redirects to the `successUrl` passed to `subscription.upgrade` (`/dashboard/settings?checkout=success`).
 
 ## Step 16b — `src/lib/auth-client.ts`
 
-Client-side auth client. Always includes the Polar plugin (costs nothing when Polar is unconfigured).
+Client-side auth client. Always includes the Stripe plugin (costs nothing when Stripe is unconfigured). `subscription: true` exposes `authClient.subscription.*` (upgrade, cancel, restore, list, billingPortal).
 
 ```ts
 import { createAuthClient } from "better-auth/react";
 import { magicLinkClient, inferAdditionalFields } from "better-auth/client/plugins";
-import { polarClient } from "@polar-sh/better-auth";
+import { stripeClient } from "@better-auth/stripe/client";
 import type { auth } from "./auth";
 
 export const authClient = createAuthClient({
-  plugins: [magicLinkClient(), polarClient(), inferAdditionalFields<typeof auth>()],
+  plugins: [magicLinkClient(), stripeClient({ subscription: true }), inferAdditionalFields<typeof auth>()],
 });
 ```
 
@@ -470,29 +462,34 @@ if (process.env.NODE_ENV !== "production") globalForDb.db = db;
 > In production, module code runs once — the guard is a no-op. In dev, hot reloads reuse the existing client.
 > Always `db:generate` + `db:migrate` — never `db:push` in normal workflow. `db:push` is reserved for emergency schema fixes only.
 
-## Step 15c — Polar product setup
+## Step 15c — Stripe product setup
 
-1. Go to your [Polar dashboard](https://polar.sh) → Products → create a product (name, price, etc.)
-2. Copy the **Product ID** (e.g. `prod_xxxxxxxxxxxxxxxx`)
-3. Paste it into `POLAR_PRODUCT_ID` in `.env.local`
+1. Go to your [Stripe dashboard](https://dashboard.stripe.com) → Product catalog → add a product with a recurring price.
+2. Copy the **Price ID** (e.g. `price_xxxxxxxxxxxxxxxx`) — not the product id.
+3. Paste it into `STRIPE_PRICE_ID` in `.env.local`, and set `STRIPE_SECRET_KEY` (from Developers → API keys).
+4. Get `STRIPE_WEBHOOK_SECRET` from the webhook endpoint (`pnpm stripe:dev` prints it locally, or create an endpoint in the dashboard pointing at `<BETTER_AUTH_URL>/api/auth/stripe/webhook`).
 
-That's it. A **Get Pro** button appears in the dashboard automatically when signed in and the env var is set. It calls `authClient.checkout({ productId })` and redirects to Polar checkout.
+That's it. An **Upgrade to Pro** button appears in the dashboard automatically when signed in and `STRIPE_PRICE_ID` is set. It calls `authClient.subscription.upgrade({ plan })` and redirects to Stripe Checkout.
 
 **Checkout flow wired in `src/components/checkout-button.tsx`:**
 
 ```ts
-await authClient.checkout({ products: productId });
+await authClient.subscription.upgrade({
+  plan: "pro", // matches the plan name in auth.ts
+  successUrl: "/dashboard/settings?checkout=success",
+  cancelUrl: "/dashboard/settings",
+});
 ```
 
-**Webhook events** (handled in `src/lib/auth.ts`) update the `subscriptions` table automatically:
+**Manage / cancel** is wired in `src/components/manage-subscription-button.tsx` via the Stripe billing portal:
 
-- `onSubscriptionCreated` → insert row
-- `onSubscriptionUpdated` → update period/status
-- `onSubscriptionActive` / `onSubscriptionUncanceled` → set active
-- `onSubscriptionCanceled` → set canceled
-- `onSubscriptionRevoked` → set revoked
+```ts
+await authClient.subscription.billingPortal({ returnUrl: "/dashboard/settings" });
+```
 
-> Local webhook testing: `pnpm polar:webhook` (ngrok) then set the webhook URL in Polar dashboard.
+**Webhooks** are handled entirely by the plugin (`/api/auth/stripe/webhook`) — it upserts the `subscriptions` table on every `customer.subscription.*` event and resolves the user via `stripeCustomerId`. No manual handler to write.
+
+> Local webhook testing: `pnpm stripe:dev` (Stripe CLI `stripe listen`) forwards events to `/api/auth/stripe/webhook` and prints the signing secret to put in `STRIPE_WEBHOOK_SECRET`.
 
 ## Step 14b — Root layout (`src/app/layout.tsx`)
 
@@ -566,7 +563,7 @@ The sidebar footer contains the **theme toggle** (light → dark → system cycl
 Shows two cards only:
 
 1. **Welcome card** — user's name and email (from session)
-2. **Subscription card** — "Free" or "Pro" status badge + "Upgrade to Pro" button (calls `authClient.checkout`) when not subscribed; "Manage subscription" portal link when subscribed
+2. **Subscription card** — "Free" or "Pro" status badge + "Upgrade to Pro" button (calls `authClient.subscription.upgrade`) when not subscribed; "Manage subscription" billing-portal link when subscribed
 
 No placeholder stats, no fake charts. Both pieces of data are real and immediately useful.
 
@@ -626,15 +623,16 @@ The template assumes a freemium model: users access the app for free and optiona
 **`src/features/subscriptions/data/index.ts`** — query subscription status:
 
 ```ts
+// The Stripe plugin keeps `subscriptions` in sync; `referenceId` holds the user id.
 export async function getSubscription(userId: string) {
   return db.query.subscriptions.findFirst({
-    where: eq(subscriptions.userId, userId),
+    where: eq(subscriptions.referenceId, userId),
   });
 }
 
 export async function isSubscribed(userId: string) {
   const subscription = await getSubscription(userId);
-  return subscription?.status === "active";
+  return subscription?.status === "active" || subscription?.status === "trialing";
 }
 ```
 
@@ -651,7 +649,9 @@ export const authActionClient = actionClient.use(async ({ next }) => {
 
 export const proActionClient = authActionClient.use(async ({ next, ctx }) => {
   const subscription = await getSubscription(ctx.user.id);
-  if (subscription?.status !== "active") throw new Error("Pro subscription required");
+  if (subscription?.status !== "active" && subscription?.status !== "trialing") {
+    throw new Error("Pro subscription required");
+  }
   return next({ ctx: { ...ctx, subscription } });
 });
 ```
@@ -798,14 +798,14 @@ onError: ({ error }) => {
   "db:studio": "drizzle-kit studio",
   "db:seed": "tsx src/db/seed.ts", // empty by default — add project-specific seed data per project
   "email:dev": "email dev src/emails",
-  "polar:webhook": "ngrok http 3000",
+  "stripe:dev": "stripe listen --forward-to localhost:3000/api/auth/stripe/webhook",
   "auth:generate": "better-auth generate --output src/db/schema/auth.ts -y",
   "test": "tsx src/scripts/test.ts" // smoke test: DB connectivity + optional service checks
 }
 ```
 
 > `postlint` runs `tsc --noEmit` automatically after every lint run.
-> `polar:webhook`: expose local port via ngrok, then configure Polar dashboard webhook URL.
+> `stripe:dev`: forward Stripe events to the local app via the Stripe CLI (`stripe listen`). Requires `stripe login` once.
 > Railpack handles the standalone build and container startup — no Railway-specific build/start scripts needed.
 
 ## Step 20 — Deployment on Railway
@@ -848,9 +848,9 @@ EMAIL_SERVER_PASSWORD=
 **Optional app service variables (leave blank to disable the feature):**
 
 ```
-POLAR_ACCESS_TOKEN=
-POLAR_WEBHOOK_SECRET=
-POLAR_PRODUCT_ID=
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_ID=
 AWS_ENDPOINT_URL=
 AWS_S3_BUCKET_NAME=
 AWS_DEFAULT_REGION=
@@ -897,7 +897,7 @@ export default async function HomePage() {
 Two sections:
 
 1. **Account** — user's name and email (read-only, from `verifySession()`)
-2. **Billing** — current plan badge ("Free" or "Pro") + "Upgrade to Pro" checkout button (`authClient.checkout`) when not subscribed, or "Manage subscription" Polar portal link (`authClient.customer.portal()`) when subscribed
+2. **Billing** — current plan badge ("Free" or "Pro") + "Upgrade to Pro" checkout button (`authClient.subscription.upgrade`) when not subscribed, or "Manage subscription" Stripe billing portal link (`authClient.subscription.billingPortal()`) when subscribed
 
 No password change (no password in this stack). No danger zone by default — add account deletion per project if needed.
 
@@ -922,10 +922,10 @@ async function main() {
     console.log("✓ Storage");
   }
 
-  // Polar (optional)
-  if (env.POLAR_ACCESS_TOKEN) {
-    // lightweight ping — just confirm the token is valid
-    console.log("✓ Polar (token present)");
+  // Stripe (optional)
+  if (env.STRIPE_SECRET_KEY) {
+    // lightweight check — just confirm the secret key is present
+    console.log("✓ Stripe (secret key present)");
   }
 
   console.log("\nAll checks passed.");
@@ -979,7 +979,7 @@ See `STACK.md` for the full stack setup guide, conventions, and key gotchas.
 | **shadcn/ui**         | https://ui.shadcn.com/llms.txt        |
 | **Drizzle ORM**       | https://orm.drizzle.team/llms.txt     |
 | **better-auth**       | https://www.better-auth.com/llms.txt  |
-| **Polar**             | https://polar.sh/docs/llms.txt        |
+| **Stripe**            | https://docs.stripe.com/llms.txt      |
 | **next-safe-action**  | https://next-safe-action.dev/llms.txt |
 | **Zod v4**            | https://zod.dev/llms.txt              |
 | **react-email**       | https://react.email/docs/llms.txt     |
@@ -1033,7 +1033,7 @@ pnpx skills add next-safe-action/skills
 
 7. **Auth methods** — only Google OAuth + magic link. Do **not** add `emailAndPassword: { enabled: true }` to the auth config.
 
-8. **Polar plugin** — guard with `env.POLAR_ACCESS_TOKEN` check. All 6 subscription handlers: `Created`, `Updated`, `Active`, `Uncanceled`, `Canceled`, `Revoked`. Use typed individual handlers over `onPayload`.
+8. **Stripe plugin** — guard with `env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET` so the plugin only mounts when configured. The plugin owns the `subscriptions` table, mounts its own webhook at `/api/auth/stripe/webhook`, and persists subscription state for you — do not write a manual webhook handler. `referenceId` (not `userId`) is the FK back to the user.
 
 9. **Object storage** — optional, guarded by `env.AWS_S3_BUCKET_NAME`. The S3 client is `null` when the var is absent. All storage functions call `requireS3()` internally and throw a clear error if storage is not configured.
 
@@ -1068,4 +1068,4 @@ pnpx skills add next-safe-action/skills
 
 23. **`next-themes`** — install explicitly (`pnpm add next-themes`). Do not rely on it being pulled in transitively by shadcn.
 
-24. **Polar client** — initialized in `src/lib/auth.ts` as `const polarClient = env.POLAR_ACCESS_TOKEN ? new Polar(...) : null`. The `@polar-sh/sdk` package must be in production deps.
+24. **Stripe client** — initialized in `src/lib/auth.ts` as `const stripeClient = env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET ? new Stripe(...) : null`. The `stripe` package must be in production deps. Subscription "active" checks include `trialing`, not just `active` (see `isSubscribed` / `proActionClient`).
