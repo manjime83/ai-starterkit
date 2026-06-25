@@ -9,6 +9,6 @@ export const getUploadUrl = authActionClient
   .inputSchema(z.object({ filename: z.string(), contentType: z.string() }))
   .action(async ({ parsedInput }) => {
     const key = `uploads/${createId()}-${parsedInput.filename}`;
-    const url = await getPresignedUploadUrl(key);
+    const url = await getPresignedUploadUrl(key, parsedInput.contentType || undefined);
     return { url, key };
   });

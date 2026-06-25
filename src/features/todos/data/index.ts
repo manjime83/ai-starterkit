@@ -25,3 +25,10 @@ export async function toggleTodoCompleted(input: { id: string; userId: string })
     .returning();
   return todo;
 }
+
+export async function deleteCompletedTodos(userId: string) {
+  return db
+    .delete(todos)
+    .where(and(eq(todos.userId, userId), eq(todos.completed, true)))
+    .returning();
+}
