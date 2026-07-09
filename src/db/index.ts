@@ -1,10 +1,10 @@
-import { env } from "@/env";
+import { env } from "@/lib/env";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
 
 function createDb() {
-  return drizzle(postgres(env.DATABASE_URL), { schema });
+  return drizzle(postgres(env.DATABASE_URL), { schema, casing: "snake_case" });
 }
 
 const globalForDb = globalThis as unknown as { db: ReturnType<typeof createDb> };

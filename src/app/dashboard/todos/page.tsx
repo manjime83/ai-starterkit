@@ -1,5 +1,5 @@
-import { TodoForm } from "@/features/todos/ui/todo-form";
-import { TodoList } from "@/features/todos/ui/todo-list";
+import { TodoForm } from "@/features/todos/components/todo-form";
+import { TodoList } from "@/features/todos/components/todo-list";
 import { verifySession } from "@/lib/auth";
 
 export default async function TodosPage() {

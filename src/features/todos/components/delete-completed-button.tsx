@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Trash2Icon } from "lucide-react";
 import { useAction } from "next-safe-action/hooks";
 import { toast } from "sonner";
-import { deleteCompletedTodosAction } from "../actions/delete-completed-todos";
+import { deleteCompletedTodosAction } from "../actions";
 
 export function DeleteCompletedButton({ completedCount }: { completedCount: number }) {
   const { execute, isPending } = useAction(deleteCompletedTodosAction, {

@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { MagicLinkEmail } from "@/emails/magic-link";
-import { env } from "@/env";
 import { sendEmail } from "@/lib/email";
+import { env } from "@/lib/env";
 import { stripe } from "@better-auth/stripe";
 import { init } from "@paralleldrive/cuid2";
 import { betterAuth } from "better-auth";

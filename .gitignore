@@ -9,6 +9,7 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+.pnpm-store
 
 # testing
 /coverage
@@ -42,3 +43,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+!.env.example
+
+# AI skills (installed per-project via `skills add`)
+.agents/
+
+# terraform
+infra/.terraform/
+*.tfstate*
+.env.infra

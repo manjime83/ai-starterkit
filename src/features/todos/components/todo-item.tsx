@@ -5,8 +5,7 @@ import type { todos } from "@/db/schema";
 import type { InferSelectModel } from "drizzle-orm";
 import { useOptimisticAction } from "next-safe-action/hooks";
 import { toast } from "sonner";
-import { getDownloadUrl } from "../actions/get-download-url";
-import { toggleTodo } from "../actions/toggle-todo";
+import { getDownloadUrl, toggleTodo } from "../actions";
 
 type Todo = InferSelectModel<typeof todos>;
 

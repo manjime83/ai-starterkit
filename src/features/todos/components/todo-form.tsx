@@ -9,8 +9,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import type { z } from "zod";
-import { createTodo } from "../actions/create-todo";
-import { getUploadUrl } from "../actions/get-upload-url";
+import { createTodo, getUploadUrl } from "../actions";
 import { createTodoSchema } from "../schemas";
 
 type FormValues = z.infer<typeof createTodoSchema>;

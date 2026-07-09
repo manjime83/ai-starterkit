@@ -1,15 +1,20 @@
-import { env } from "@/env";
-import nodemailer from "nodemailer";
+import { env } from "@/lib/env";
+import { SendEmailCommand, SESv2Client } from "@aws-sdk/client-sesv2";
 import type { ReactElement } from "react";
 import { render } from "react-email";
 
-const transporter = nodemailer.createTransport({
-  host: env.EMAIL_SERVER_HOST,
-  port: parseInt(env.EMAIL_SERVER_PORT),
-  auth: env.EMAIL_SERVER_USER ? { user: env.EMAIL_SERVER_USER, pass: env.EMAIL_SERVER_PASSWORD } : undefined,
+const ses = new SESv2Client({
+  region: env.AWS_REGION,
+  credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },
 });
 
 export async function sendEmail({ to, subject, react }: { to: string; subject: string; react: ReactElement }) {
   const html = await render(react);
-  await transporter.sendMail({ from: env.EMAIL_FROM, to, subject, html });
+  await ses.send(
+    new SendEmailCommand({
+      FromEmailAddress: env.EMAIL_FROM,
+      Destination: { ToAddresses: [to] },
+      Content: { Simple: { Subject: { Data: subject }, Body: { Html: { Data: html } } } },
+    }),
+  );
 }

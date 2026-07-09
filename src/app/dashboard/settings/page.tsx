@@ -2,9 +2,9 @@ import { CheckoutButton } from "@/components/checkout-button";
 import { ManageSubscriptionButton } from "@/components/manage-subscription-button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { env } from "@/env";
 import { getSubscription } from "@/features/subscriptions/data";
 import { verifySession } from "@/lib/auth";
+import { env } from "@/lib/env";
 
 export default async function SettingsPage() {
   const session = await verifySession();
