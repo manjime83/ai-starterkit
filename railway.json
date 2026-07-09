@@ -1,7 +1,0 @@
-{
-  "deploy": {
-    "preDeployCommand": "pnpm db:migrate",
-    "healthcheckPath": "/api/health",
-    "healthcheckTimeout": 60
-  }
-}

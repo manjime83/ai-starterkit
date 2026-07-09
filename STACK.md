@@ -23,7 +23,7 @@
 | TypeScript base | @tsconfig/strictest + @tsconfig/next                  |
 | Script runner   | tsx                                                   |
 | Dev concurrency | concurrently                                          |
-| Local services  | Docker Compose (Postgres + SeaweedFS S3)              |
+| Local services  | Docker Compose (Postgres)                             |
 | CI              | GitHub Actions (format check + lint)                  |
 | Infrastructure  | Terraform (`terraform-aws-modules`)                   |
 | DB backups      | Railway cron container (pg_dump → S3)                 |
@@ -162,9 +162,8 @@ STRIPE_WEBHOOK_SECRET=""
 STRIPE_PRICE_ID=""
 
 # S3 object storage — bucket name defaults to "uploads"; set BUCKET_NAME to override.
-# The endpoint below targets local SeaweedFS (compose.yaml). Unset both for real AWS S3 in production.
-BUCKET_ENDPOINT="http://localhost:8333"
-BUCKET_FORCE_PATH_STYLE="true"
+# BUCKET_ENDPOINT="" # only for non-AWS S3-compatible hosts (e.g. MinIO)
+# BUCKET_FORCE_PATH_STYLE="true" # only for S3 hosts that need path-style URLs (e.g. MinIO)
 # BUCKET_NAME="uploads"
 ```
 
@@ -173,8 +172,8 @@ BUCKET_FORCE_PATH_STYLE="true"
 > credentials first.
 > The AWS key pair is shared by SES (email) and S3 (storage) — one IAM user with `ses:SendEmail` plus scoped S3
 > access to the project bucket.
-> For local development, `docker compose up -d` (Step 10) provides Postgres and S3 — the defaults above already
-> point at them.
+> For local development, `docker compose up -d` (Step 10) provides Postgres — the `DATABASE_URL` default above
+> already points at it. Storage and email use real AWS (dev bucket + SES) in every environment.
 
 ## Step 9 — lib/env.ts (t3-env)
 
@@ -231,25 +230,19 @@ export const env = createEnv({
 
 ## Step 10 — compose.yaml (local development)
 
-Two services for local development. Compose reads `./.env` automatically for `${VAR}` interpolation, and all
-state lives under `./.data` (add `/.data` to `.gitignore`).
+A single service for local development. Compose reads `./.env` automatically for `${VAR}` interpolation, and
+all state lives under `./.data` (add `/.data` to `.gitignore`).
 
 - **postgres** — `postgres:latest` on port 5432, data mounted at `./.data/postgres:/var/lib/postgresql`.
   Credentials interpolate with overridable defaults — `${POSTGRES_USER:-postgres}`,
   `${POSTGRES_PASSWORD:-postgres}`, `${POSTGRES_DB:-app}` — plus a `pg_isready` healthcheck.
-- **s3** — SeaweedFS (`chrislusf/seaweedfs:latest`), a **single container**, S3 API on port 8333, data in
-  `./.data/s3`. Its startup command first writes an S3 identity config to `/etc/s3.json` registering the
-  **same AWS key pair from `.env`** (`${AWS_ACCESS_KEY_ID:?}` / `${AWS_SECRET_ACCESS_KEY:?}`, all actions:
-  Admin/Read/Write/List/Tagging), then
-  `exec weed server -dir=/data -ip.bind=0.0.0.0 -s3 -s3.port=8333 -s3.config=/etc/s3.json`.
 
-Start with `docker compose up -d`, then point `.env` at the local services (these are the `.env.example`
-defaults): `DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app"`,
-`BUCKET_ENDPOINT="http://localhost:8333"`, `BUCKET_FORCE_PATH_STYLE="true"`.
+Start with `docker compose up -d`; the `.env.example` default
+`DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app"` already points at it.
 
-> No init sidecar or console needed: SeaweedFS creates buckets automatically on the first write.
-> The identity config is **required** — SeaweedFS with no configured identity rejects AWS-SDK-signed requests.
-> Email is the one service without a local emulator: magic-link sends go through real SES even in dev.
+> There is no local S3 emulator: storage talks to real AWS S3 in every environment. Use the dev bucket the
+> Terraform `default` workspace provisions (`<project>-dev-uploads`, Step 41) with the app user's credentials.
+> Email likewise goes through real SES in dev.
 
 ## Step 11 — next.config.ts
 
