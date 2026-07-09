@@ -34,7 +34,7 @@
 ## Step 1 — Create Next.js App
 
 ```bash
-pnpm dlx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --yes
+pnpm dlx create-next-app@latest . --typescript --tailwind --eslint --app --no-src-dir --yes
 ```
 
 ## Step 2 — Install Production Dependencies
@@ -91,7 +91,7 @@ pnpm shadcn add sidebar separator avatar tooltip sonner
     "jsx": "react-jsx",
     "noPropertyAccessFromIndexSignature": false,
     "exactOptionalPropertyTypes": false,
-    "paths": { "@/*": ["./src/*"] }
+    "paths": { "@/*": ["./*"] }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", ".next/dev/types/**/*.ts", "**/*.mts"],
   "exclude": ["node_modules", ".next"]
@@ -176,7 +176,7 @@ BUCKET_FORCE_PATH_STYLE="true"
 > For local development, `docker compose up -d` (Step 10) provides Postgres and S3 — the defaults above already
 > point at them.
 
-## Step 9 — src/lib/env.ts (t3-env)
+## Step 9 — lib/env.ts (t3-env)
 
 Validate all env vars with Zod v4. Use `z.url()` and `z.email()` directly (not `z.string().url()` — deprecated in Zod v4).
 
@@ -231,58 +231,24 @@ export const env = createEnv({
 
 ## Step 10 — compose.yaml (local development)
 
-Postgres + S3-compatible storage (SeaweedFS) for local development. Compose reads `./.env` automatically for
-`${VAR}` interpolation, and all state lives under `./.data` (add `/.data` to `.gitignore`).
+Two services for local development. Compose reads `./.env` automatically for `${VAR}` interpolation, and all
+state lives under `./.data` (add `/.data` to `.gitignore`).
 
-```yaml
-# Local development services. Compose automatically reads ./.env for ${VAR} interpolation.
-# All state lives under ./.data (gitignored).
-services:
-  postgres:
-    image: postgres:latest
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-app}
-    ports:
-      - "5432:5432"
-    volumes:
-      - ./.data/postgres:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # SeaweedFS S3-compatible storage. Accepts the AWS key pair from .env, so the
-  # app's S3 client works locally unchanged (BUCKET_ENDPOINT=http://localhost:8333).
-  # Buckets are created automatically on first write — no init step needed.
-  s3:
-    image: chrislusf/seaweedfs:latest
-    restart: unless-stopped
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        echo '{"identities":[{"name":"dev","credentials":[{"accessKey":"${AWS_ACCESS_KEY_ID:?set in .env}","secretKey":"${AWS_SECRET_ACCESS_KEY:?set in .env}"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > /etc/s3.json
-        exec weed server -dir=/data -ip.bind=0.0.0.0 -s3 -s3.port=8333 -s3.config=/etc/s3.json
-    ports:
-      - "8333:8333"
-    volumes:
-      - ./.data/s3:/data
-```
+- **postgres** — `postgres:latest` on port 5432, data mounted at `./.data/postgres:/var/lib/postgresql`.
+  Credentials interpolate with overridable defaults — `${POSTGRES_USER:-postgres}`,
+  `${POSTGRES_PASSWORD:-postgres}`, `${POSTGRES_DB:-app}` — plus a `pg_isready` healthcheck.
+- **s3** — SeaweedFS (`chrislusf/seaweedfs:latest`), a **single container**, S3 API on port 8333, data in
+  `./.data/s3`. Its startup command first writes an S3 identity config to `/etc/s3.json` registering the
+  **same AWS key pair from `.env`** (`${AWS_ACCESS_KEY_ID:?}` / `${AWS_SECRET_ACCESS_KEY:?}`, all actions:
+  Admin/Read/Write/List/Tagging), then
+  `exec weed server -dir=/data -ip.bind=0.0.0.0 -s3 -s3.port=8333 -s3.config=/etc/s3.json`.
 
 Start with `docker compose up -d`, then point `.env` at the local services (these are the `.env.example`
-defaults):
+defaults): `DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app"`,
+`BUCKET_ENDPOINT="http://localhost:8333"`, `BUCKET_FORCE_PATH_STYLE="true"`.
 
-- `DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app"` — matches the compose defaults; override
-  with `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` in `.env` if needed.
-- `BUCKET_ENDPOINT="http://localhost:8333"` + `BUCKET_FORCE_PATH_STYLE="true"` — SeaweedFS registers the same
-  AWS key pair from `.env` as its S3 identity, so the app's S3 client works locally unchanged. Unset both in
-  production (real AWS S3).
-
-> SeaweedFS creates buckets automatically on the first write — no init step or console needed.
+> No init sidecar or console needed: SeaweedFS creates buckets automatically on the first write.
+> The identity config is **required** — SeaweedFS with no configured identity rejects AWS-SDK-signed requests.
 > Email is the one service without a local emulator: magic-link sends go through real SES even in dev.
 
 ## Step 11 — next.config.ts
@@ -300,7 +266,7 @@ export default nextConfig;
 > Railpack (Step 43) handles the production build and startup on Railway — no `output: "standalone"` or other
 > deployment-specific options required.
 
-## Step 12 — `src/lib/constants.ts`
+## Step 12 — `lib/constants.ts`
 
 Compile-time project constants. The first file to edit after cloning.
 
@@ -309,63 +275,62 @@ export const APP_NAME = "Your App";
 ```
 
 > Used in: magic link email subject/header, home page `<h1>`, browser tab title (`metadata.title` in root layout), sidebar header.
-> Do not put runtime config here — that belongs in `src/lib/env.ts`.
+> Do not put runtime config here — that belongs in `lib/env.ts`.
 
 ## Step 13 — Project Structure (Feature-Sliced Design)
 
-New features live in `src/features/`, keeping business logic out of the Next.js `app/` router segments:
+New features live in `features/`, keeping business logic out of the Next.js `app/` router segments:
 
 ```
-src/
-  features/          ← one folder per product feature
-    todos/           ← DEMO ONLY — delete after internalizing the pattern
-      components/    ← React components for this feature
-      actions.ts     ← server actions ("use server" at the top, all actions in one file)
-      data.ts        ← Drizzle queries
-      schemas.ts     ← shared Zod schemas (used by both actions and forms)
-    subscriptions/   ← subscription gating (always present when Stripe is enabled)
-      data.ts        ← getSubscription + isSubscribed queries
-  components/ui/     ← shadcn components
-  hooks/             ← shared React hooks (use-mobile from shadcn)
-  db/                ← Drizzle schema, client, seed
-  emails/            ← react-email templates
-  lib/               ← env (t3-env), auth (+ verifySession), auth-client, constants, email, storage, safe-action, utils
-  scripts/           ← smoke test (test.ts)
-  proxy.ts           ← Next.js proxy: redirects unauthenticated /dashboard traffic to /sign-in
-  app/               ← Next.js App Router (routing only — no business logic)
-    api/
-      auth/          ← better-auth catch-all route
-      cron/          ← scheduled-job stub, guarded by CRON_SECRET
-      health/        ← GET → 200 ok / 503 error
-    dashboard/       ← protected shell
-      layout.tsx     ← renders AppSidebar + SidebarInset; calls verifySession for sidebar user info
-      page.tsx       ← welcome card + subscription status card
-      todos/         ← todos feature page (demo — delete when done)
-      settings/      ← account info + billing (plan badge + Stripe checkout/portal)
-    sign-in/         ← Google OAuth button + magic link email input
-    page.tsx         ← minimal home page: APP_NAME h1, tagline, session-aware CTA button
+features/          ← one folder per product feature
+  todos/           ← DEMO ONLY — delete after internalizing the pattern
+    components/    ← React components for this feature
+    actions.ts     ← server actions ("use server" at the top, all actions in one file)
+    data.ts        ← Drizzle queries
+    schemas.ts     ← shared Zod schemas (used by both actions and forms)
+  subscriptions/   ← subscription gating (always present when Stripe is enabled)
+    data.ts        ← getSubscription + isSubscribed queries
+components/ui/     ← shadcn components
+hooks/             ← shared React hooks (use-mobile from shadcn)
+db/                ← Drizzle schema, client, seed
+emails/            ← react-email templates
+lib/               ← env (t3-env), auth (+ verifySession), auth-client, constants, email, storage, safe-action, utils
+scripts/           ← smoke test (test.ts)
+proxy.ts           ← Next.js proxy: redirects unauthenticated /dashboard traffic to /sign-in
+app/               ← Next.js App Router (routing only — no business logic)
+  api/
+    auth/          ← better-auth catch-all route
+    cron/          ← scheduled-job stub, guarded by CRON_SECRET
+    health/        ← GET → 200 ok / 503 error
+  dashboard/       ← protected shell
+    layout.tsx     ← renders AppSidebar + SidebarInset; calls verifySession for sidebar user info
+    page.tsx       ← welcome card + subscription status card
+    todos/         ← todos feature page (demo — delete when done)
+    settings/      ← account info + billing (plan badge + Stripe checkout/portal)
+  sign-in/         ← Google OAuth button + magic link email input
+  page.tsx         ← minimal home page: APP_NAME h1, tagline, session-aware CTA button
 ```
 
 **Rules:**
 
 - `features/` may import from `lib/`, `db/`, `components/ui/` — but never from other features.
 - `app/` route segments import from `features/` and `lib/auth` for session checks.
-- Adding a feature: create `src/features/<name>/` with `components/`, `actions.ts`, `data.ts`, `schemas.ts` — only the pieces the feature needs.
+- Adding a feature: create `features/<name>/` with `components/`, `actions.ts`, `data.ts`, `schemas.ts` — only the pieces the feature needs.
 - **No barrel files** — import directly from the file that defines the symbol (`@/features/todos/data`, `@/features/todos/components/todo-form`).
 - `schemas.ts` defines Zod schemas shared between the action input validation and the react-hook-form `resolver`. Define once, use in both.
-- Add a nav entry in `src/components/app-sidebar.tsx` `navItems` array to expose the feature in the sidebar.
+- Add a nav entry in `components/app-sidebar.tsx` `navItems` array to expose the feature in the sidebar.
 
 ## Step 14 — Drizzle Schema
 
 Split into two files: `auth.ts` (generated) and `index.ts` (application tables + re-export).
 
-**`src/db/schema/auth.ts`** — better-auth tables (run `pnpm auth:generate` to regenerate):
+**`db/schema/auth.ts`** — better-auth tables (run `pnpm auth:generate` to regenerate):
 
 - Use **plural** table names: `users`, `sessions`, `accounts`, `verifications`
 - This is required by `usePlural: true` in the drizzle adapter
 - The `@better-auth/stripe` plugin owns the `subscriptions` table and adds a `stripeCustomerId` column to `users`. Both live here (the plugin's schema is part of better-auth's generated output).
 
-**`src/db/schema/index.ts`** — application tables (todos), plus `export * from "./auth"` so `@/db/schema` exposes
+**`db/schema/index.ts`** — application tables (todos), plus `export * from "./auth"` so `@/db/schema` exposes
 everything:
 
 - Use `@paralleldrive/cuid2` for IDs: `.$defaultFn(() => createId())`
@@ -393,8 +358,8 @@ export const todos = pgTable("todos", {
 import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
-  schema: "./src/db/schema/index.ts",
-  out: "./src/db/migrations",
+  schema: "./db/schema/index.ts",
+  out: "./db/migrations",
   dialect: "postgresql",
   dbCredentials: { url: process.env.DATABASE_URL! },
 });
@@ -402,7 +367,7 @@ export default defineConfig({
 
 > Use `process.env` directly — `@/*` aliases don't resolve in drizzle.config.ts.
 
-## Step 16 — DB client (`src/db/index.ts`)
+## Step 16 — DB client (`db/index.ts`)
 
 Singleton pattern to prevent connection pool exhaustion during Next.js dev hot reloads:
 
@@ -422,7 +387,7 @@ if (process.env.NODE_ENV !== "production") globalForDb.db = db;
 > In production, module code runs once — the guard is a no-op. In dev, hot reloads reuse the existing client.
 > Always `db:generate` + `db:migrate` — never `db:push` in normal workflow. `db:push` is reserved for emergency schema fixes only.
 
-## Step 17 — `src/app/api/auth/[...all]/route.ts`
+## Step 17 — `app/api/auth/[...all]/route.ts`
 
 ```ts
 import { auth } from "@/lib/auth";
@@ -433,7 +398,7 @@ export const { GET, POST } = toNextJsHandler(auth);
 
 > All auth routes — Google OAuth callbacks, magic link verification, Stripe webhooks (`/api/auth/stripe/webhook`) — go through this single catch-all.
 
-## Step 18 — better-auth (`src/lib/auth.ts`)
+## Step 18 — better-auth (`lib/auth.ts`)
 
 Auth methods: **Google OAuth** (social) + **magic link** (passwordless). Email+password is not included.
 
@@ -484,7 +449,7 @@ export const auth = betterAuth({
 > `createCustomerOnSignUp: true` creates a Stripe customer on every new sign-up and stores its id on `users.stripeCustomerId`.
 > Add a plan to the `plans` array for each Stripe Price you sell. `name` ("pro") is what the client passes to `subscription.upgrade({ plan })`.
 
-Also export `verifySession` from `src/lib/auth.ts` for use in dashboard pages:
+Also export `verifySession` from `lib/auth.ts` for use in dashboard pages:
 
 ```ts
 import { cache } from "react";
@@ -503,7 +468,7 @@ export const verifySession = cache(async () => {
 > The plugin's webhook updates `status` to `active`, `trialing`, `canceled`, etc. — query it via `getSubscription` / `isSubscribed` (see Step 21).
 > Checkout success redirects to the `successUrl` passed to `subscription.upgrade` (`/dashboard/settings?checkout=success`).
 
-## Step 19 — `src/lib/auth-client.ts`
+## Step 19 — `lib/auth-client.ts`
 
 Client-side auth client. Always includes the Stripe plugin (costs nothing when Stripe is unconfigured). `subscription: true` exposes `authClient.subscription.*` (upgrade, cancel, restore, list, billingPortal).
 
@@ -529,7 +494,7 @@ export const authClient = createAuthClient({
 
 That's it. An **Upgrade to Pro** button appears in the dashboard automatically when signed in and `STRIPE_PRICE_ID` is set. It calls `authClient.subscription.upgrade({ plan })` and redirects to Stripe Checkout.
 
-**Checkout flow wired in `src/components/checkout-button.tsx`:**
+**Checkout flow wired in `components/checkout-button.tsx`:**
 
 ```ts
 await authClient.subscription.upgrade({
@@ -539,7 +504,7 @@ await authClient.subscription.upgrade({
 });
 ```
 
-**Manage / cancel** is wired in `src/components/manage-subscription-button.tsx` via the Stripe billing portal:
+**Manage / cancel** is wired in `components/manage-subscription-button.tsx` via the Stripe billing portal:
 
 ```ts
 await authClient.subscription.billingPortal({ returnUrl: "/dashboard/settings" });
@@ -549,11 +514,11 @@ await authClient.subscription.billingPortal({ returnUrl: "/dashboard/settings" }
 
 > Local webhook testing: `pnpm stripe:dev` (Stripe CLI `stripe listen`) forwards events to `/api/auth/stripe/webhook` and prints the signing secret to put in `STRIPE_WEBHOOK_SECRET`.
 
-## Step 21 — Server action clients + subscription gating (`src/lib/safe-action.ts`)
+## Step 21 — Server action clients + subscription gating (`lib/safe-action.ts`)
 
 The template assumes a freemium model: users access the app for free and optionally upgrade to Pro.
 
-**`src/features/subscriptions/data.ts`** — query subscription status:
+**`features/subscriptions/data.ts`** — query subscription status:
 
 ```ts
 // The Stripe plugin keeps `subscriptions` in sync; `referenceId` holds the user id.
@@ -572,7 +537,7 @@ export async function isSubscribed(userId: string) {
 }
 ```
 
-**`src/lib/safe-action.ts`** — action clients with an `ActionError` class for user-facing error messages:
+**`lib/safe-action.ts`** — action clients with an `ActionError` class for user-facing error messages:
 
 ```ts
 import { createSafeActionClient, DEFAULT_SERVER_ERROR_MESSAGE } from "next-safe-action";
@@ -629,84 +594,36 @@ onError: ({ error }) => {
 > next-safe-action v8 uses Standard Schema — Zod v4 works natively.
 > `onSuccess` callback receives `{ data, input }` as a single object.
 
-## Step 23 — Root layout (`src/app/layout.tsx`)
+## Step 23 — Root layout (`app/layout.tsx`)
 
-```tsx
-import { ThemeProvider } from "next-themes";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { Toaster } from "@/components/ui/sonner";
-import { APP_NAME } from "@/lib/constants";
+- `<html lang="en" suppressHydrationWarning>` — the attribute silences the next-themes hydration mismatch.
+- `metadata.title` is `APP_NAME` from `lib/constants.ts`.
+- Provider nesting inside `<body>`: `<ThemeProvider attribute="class" defaultTheme="system" enableSystem>` →
+  `<TooltipProvider>` → `{children}` + `<Toaster />` (the shadcn sonner wrapper).
+- `<Toaster />` must sit inside `<ThemeProvider>` — it reads `useTheme`.
 
-export const metadata = { title: APP_NAME };
+## Step 24 — Dashboard layout (`app/dashboard/layout.tsx`)
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en" suppressHydrationWarning>
-      <body>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          <TooltipProvider>
-            {children}
-            <Toaster />
-          </TooltipProvider>
-        </ThemeProvider>
-      </body>
-    </html>
-  );
-}
-```
-
-> `suppressHydrationWarning` on `<html>` silences next-themes hydration mismatch.
-> `<Toaster />` must be inside `<ThemeProvider>` — it uses `useTheme` from Sonner.
-
-## Step 24 — Dashboard layout (`src/app/dashboard/layout.tsx`)
-
-```tsx
-import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/app-sidebar";
-import { verifySession } from "@/lib/auth";
-
-export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const session = await verifySession();
-
-  return (
-    <SidebarProvider>
-      <AppSidebar user={session.user} />
-      <SidebarInset>{children}</SidebarInset>
-    </SidebarProvider>
-  );
-}
-```
+An async layout that calls `verifySession()` and renders `<SidebarProvider>` → `<AppSidebar user={session.user} />`
+plus `<SidebarInset>{children}</SidebarInset>`.
 
 > The layout calls `verifySession()` for the sidebar user info. Each protected page **also** calls it as its own
 > guard — React `cache()` deduplicates the DB hit (see Step 18).
 
-## Step 25 — Route protection (`src/proxy.ts`)
+## Step 25 — Route protection (`proxy.ts`)
 
-Next.js 16 proxy (the successor to `middleware.ts`) redirects unauthenticated visitors away from `/dashboard`
-before any page code runs:
+Next.js 16 proxy (the successor to `middleware.ts` — the file must be `proxy.ts` with a named
+`export function proxy(request: NextRequest)`). Behavior:
 
-```ts
-import { getSessionCookie } from "better-auth/cookies";
-import { NextResponse, type NextRequest } from "next/server";
-
-export function proxy(request: NextRequest) {
-  const sessionCookie = getSessionCookie(request);
-  if (!sessionCookie) {
-    return NextResponse.redirect(new URL("/sign-in", request.url));
-  }
-  return NextResponse.next();
-}
-
-export const config = {
-  matcher: ["/dashboard/:path*"],
-};
-```
+- `config.matcher = ["/dashboard/:path*"]`
+- If `getSessionCookie(request)` (from `"better-auth/cookies"`) returns nothing, redirect to `/sign-in`;
+  otherwise `NextResponse.next()`.
 
 > This is an **optimistic** check — `getSessionCookie` only tests for the cookie's presence, it does not validate
 > the session against the DB. It exists for fast redirects, not security. The real guard remains `verifySession()`
 > in the layout and every protected page (Step 18). Do not add DB or fetch calls here.
 
-## Step 26 — App sidebar (`src/components/app-sidebar.tsx`)
+## Step 26 — App sidebar (`components/app-sidebar.tsx`)
 
 Default `navItems`:
 
@@ -722,35 +639,17 @@ The sidebar footer contains the **theme toggle** (light → dark → system cycl
 
 > Default theme: **system** (matches OS preference). Toggle in sidebar footer — no toggle on the settings page.
 
-## Step 27 — Home page (`src/app/page.tsx`)
+## Step 27 — Home page (`app/page.tsx`)
 
 Minimal landing page with a session-aware CTA. Not a redirect — an actual shippable page.
 
-```tsx
-import { APP_NAME } from "@/lib/constants";
-import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-import Link from "next/link";
-import { buttonVariants } from "@/components/ui/button";
+- Server Component; reads the session via `auth.api.getSession({ headers: await headers() })`.
+- Renders `APP_NAME` as the `<h1>`, a one-line tagline (replace per project), and one CTA link:
+  to `/dashboard` ("Go to Dashboard") when signed in, `/sign-in` ("Get Started") otherwise —
+  styled with `buttonVariants({ size: "lg" })` on a `<Link>` (no `asChild`, see Gotcha 1).
+- No nav bar, no features section, no footer.
 
-export default async function HomePage() {
-  const session = await auth.api.getSession({ headers: await headers() });
-
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8">
-      <h1 className="text-4xl font-bold">{APP_NAME}</h1>
-      <p className="text-muted-foreground">Build your SaaS faster.</p>
-      <Link href={session ? "/dashboard" : "/sign-in"} className={buttonVariants({ size: "lg" })}>
-        {session ? "Go to Dashboard" : "Get Started"}
-      </Link>
-    </main>
-  );
-}
-```
-
-> No nav bar, no features section, no footer. Replace the tagline per project.
-
-## Step 28 — Sign-in page (`src/app/sign-in/page.tsx`)
+## Step 28 — Sign-in page (`app/sign-in/page.tsx`)
 
 Supports **two methods only**:
 
@@ -761,7 +660,7 @@ Email+password is **not** included. Do not add it.
 
 Google OAuth requires `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` set in env. Configure the OAuth client in [Google Cloud Console](https://console.cloud.google.com) → Credentials → OAuth 2.0 Client IDs. Add `http://localhost:3000/api/auth/callback/google` as an authorized redirect URI.
 
-## Step 29 — Dashboard overview page (`src/app/dashboard/page.tsx`)
+## Step 29 — Dashboard overview page (`app/dashboard/page.tsx`)
 
 Shows two cards only:
 
@@ -770,7 +669,7 @@ Shows two cards only:
 
 No placeholder stats, no fake charts. Both pieces of data are real and immediately useful.
 
-## Step 30 — Settings page (`src/app/dashboard/settings/page.tsx`)
+## Step 30 — Settings page (`app/dashboard/settings/page.tsx`)
 
 Two sections:
 
@@ -781,7 +680,7 @@ No password change (no password in this stack). No danger zone by default — ad
 
 ## Step 31 — Todos feature (demo scaffolding)
 
-**Delete `src/features/todos/` and `src/app/dashboard/todos/` once you've internalized the FSD pattern.**
+**Delete `features/todos/` and `app/dashboard/todos/` once you've internalized the FSD pattern.**
 
 A todos CRUD that exercises every convention in the stack. Implement it as a full FSD slice (`components/`,
 `actions.ts`, `data.ts`, `schemas.ts`); the exact component breakdown is up to you as long as it demonstrates:
@@ -793,7 +692,7 @@ A todos CRUD that exercises every convention in the stack. Implement it as a ful
 - **Attachment** — presigned S3 upload + download via actions (Step 34)
 - **Error convention** — validation errors inline, server errors as toast (Step 22)
 
-**`src/features/todos/schemas.ts`** — shared between actions and forms:
+**`features/todos/schemas.ts`** — shared between actions and forms:
 
 ```ts
 import { z } from "zod";
@@ -810,13 +709,13 @@ export const toggleTodoSchema = z.object({
 
 **Upload flow (two steps):**
 
-1. Client calls a `getUploadUrl` action → receives presigned URL + S3 key (from `getPresignedUploadUrl()` in `src/lib/storage.ts`)
+1. Client calls a `getUploadUrl` action → receives presigned URL + S3 key (from `getPresignedUploadUrl()` in `lib/storage.ts`)
 2. Client uploads the file directly to S3 via `fetch(presignedUrl, { method: "PUT", body: file })`
 3. Client calls the `createTodo` action with the resulting S3 key as `attachmentKey`
 
 Downloads work the same way in reverse: an action returns a presigned download URL via `getPresignedDownloadUrl()`.
 
-## Step 32 — getBaseUrl utility (`src/lib/utils.ts`)
+## Step 32 — getBaseUrl utility (`lib/utils.ts`)
 
 ```ts
 export function getBaseUrl() {
@@ -828,63 +727,24 @@ export function getBaseUrl() {
 
 > `BETTER_AUTH_URL` is already required and contains the full URL with protocol — no platform-specific env var needed.
 
-## Step 33 — Email (`src/lib/email.ts`)
+## Step 33 — Email (`lib/email.ts`)
 
 Sends through **Amazon SES** (`@aws-sdk/client-sesv2`) using the shared AWS credentials.
 
-> react-email v6 ships as a single unified package. Do **not** install `@react-email/components` or `@react-email/render` — they are deprecated. Everything comes from `"react-email"`.
+- A module-level `SESv2Client` configured with `env.AWS_REGION` and the `env.AWS_ACCESS_KEY_ID` /
+  `env.AWS_SECRET_ACCESS_KEY` pair.
+- One exported function — the contract the auth config depends on:
+  `sendEmail({ to, subject, react }: { to: string; subject: string; react: ReactElement })`.
+  It awaits `render(react)` (react-email v6's `render` is async) and sends a `SendEmailCommand` with
+  `FromEmailAddress: env.EMAIL_FROM` and simple HTML content.
 
-```ts
-import { env } from "@/lib/env";
-import { SendEmailCommand, SESv2Client } from "@aws-sdk/client-sesv2";
-import type { ReactElement } from "react";
-import { render } from "react-email";
+> react-email v6 ships as a single unified package: import `render` and all components from `"react-email"`.
+> Do **not** install `@react-email/components` or `@react-email/render` — deprecated.
 
-const ses = new SESv2Client({
-  region: env.AWS_REGION,
-  credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },
-});
-
-export async function sendEmail({ to, subject, react }: { to: string; subject: string; react: ReactElement }) {
-  const html = await render(react); // render() is async in v6 — always await it
-  await ses.send(
-    new SendEmailCommand({
-      FromEmailAddress: env.EMAIL_FROM,
-      Destination: { ToAddresses: [to] },
-      Content: { Simple: { Subject: { Data: subject }, Body: { Html: { Data: html } } } },
-    }),
-  );
-}
-```
-
-Email templates live in `src/emails/` as React components.
-
-**`src/emails/magic-link.tsx`** — minimal but complete:
-
-```tsx
-import { APP_NAME } from "@/lib/constants";
-import { Body, Button, Container, Head, Heading, Html, Preview, Section, Text } from "react-email";
-
-export function MagicLinkEmail({ url }: { url: string }) {
-  return (
-    <Html>
-      <Head />
-      <Preview>Sign in to {APP_NAME}</Preview>
-      <Body>
-        <Container>
-          <Heading>Sign in to {APP_NAME}</Heading>
-          <Section>
-            <Text>Click the button below to sign in. This link expires in 10 minutes.</Text>
-            <Button href={url}>Sign in</Button>
-            <Text>Or copy this link: {url}</Text>
-            <Text>If you didn't request this, you can safely ignore this email.</Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
-  );
-}
-```
+**`emails/magic-link.tsx`** — a `MagicLinkEmail({ url })` React component: preview + heading
+"Sign in to {APP_NAME}", a sentence noting the link expires in 10 minutes, a sign-in `<Button href={url}>`,
+the raw URL as copyable text, and an "if you didn't request this, ignore it" line. Built entirely from
+react-email components (`Html`, `Head`, `Preview`, `Body`, `Container`, `Heading`, `Section`, `Text`, `Button`).
 
 Preview templates with `pnpm email:dev` (react-email dev server) — no SES account needed for template work.
 
@@ -892,38 +752,22 @@ Preview templates with `pnpm email:dev` (react-email dev server) — no SES acco
 > start in **sandbox mode**, where recipients must also be verified — request production access before real users
 > sign in via magic link. Actual sends (including local dev sign-ins) go through the real SES API.
 
-## Step 34 — AWS S3 Object Storage (`src/lib/storage.ts`)
+## Step 34 — AWS S3 Object Storage (`lib/storage.ts`)
 
-Uses `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` against a private S3 bucket. The client is created
-directly at module level (constructing an `S3Client` makes no network calls, and the AWS credentials are always
-present). `BUCKET_NAME` defaults to `"uploads"` — no gating, storage is always available:
+Thin wrappers around `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` against a private S3 bucket.
 
-```ts
-import {
-  S3Client,
-  PutObjectCommand,
-  GetObjectCommand,
-  DeleteObjectCommand,
-  ListObjectsV2Command,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-
-const s3 = new S3Client({
-  region: env.AWS_REGION,
-  endpoint: env.BUCKET_ENDPOINT, // only set for non-AWS S3-compatible hosts
-  forcePathStyle: env.BUCKET_FORCE_PATH_STYLE,
-  credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },
-});
-
-// Functions: uploadFile, downloadFile, deleteFile, listFiles
-//            getPresignedUploadUrl, getPresignedDownloadUrl
-// All pass Bucket: env.BUCKET_NAME and use the module-level `s3` client.
-```
+- A module-level `S3Client` — constructing one makes no network calls and the AWS credentials are always
+  present. Config: `region: env.AWS_REGION`, `endpoint: env.BUCKET_ENDPOINT` (undefined for real AWS — only set
+  for S3-compatible hosts), `forcePathStyle: env.BUCKET_FORCE_PATH_STYLE`, and the shared credentials.
+- Exported functions, all passing `Bucket: env.BUCKET_NAME`: `uploadFile(key, body, contentType?)`,
+  `downloadFile(key)`, `deleteFile(key)`, `listFiles(prefix?)`, and `getPresignedUploadUrl(key, contentType?,
+expiresIn = 3600)` / `getPresignedDownloadUrl(key, expiresIn = 3600)` via `getSignedUrl`.
+- No gating: `BUCKET_NAME` defaults to `"uploads"`, so storage is always available.
 
 Keep the bucket **private** (block public access) and serve files through presigned URLs or an authenticated
-backend route. `BUCKET_ENDPOINT` stays unset for real AWS S3 — it exists only for S3-compatible hosts like MinIO.
+backend route.
 
-## Step 35 — `src/app/api/health/route.ts`
+## Step 35 — `app/api/health/route.ts`
 
 Returns 200 with `{ status: "ok" }` when healthy, 503 when the DB is unreachable.
 
@@ -943,28 +787,16 @@ export async function GET() {
 
 > Referenced by `railway.json` as the `healthcheckPath`. A failed DB connection prevents a bad deploy from going live.
 
-## Step 36 — `src/app/api/cron/route.ts`
+## Step 36 — `app/api/cron/route.ts`
 
-A stub endpoint for scheduled jobs, protected by `CRON_SECRET`. Empty by default — add project-specific work per
-project:
+A stub `GET` endpoint for scheduled jobs, empty by default — add project-specific work per project. Behavior:
 
-```ts
-import { env } from "@/lib/env";
+- Returns `401 { error: "Unauthorized" }` unless `env.CRON_SECRET` is set **and** the request carries
+  `Authorization: Bearer <CRON_SECRET>` (unset secret = endpoint disabled, same optional-feature pattern as
+  Stripe).
+- Otherwise runs the scheduled work and returns `{ status: "ok" }`.
 
-export async function GET(request: Request) {
-  if (!env.CRON_SECRET || request.headers.get("authorization") !== `Bearer ${env.CRON_SECRET}`) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  // Scheduled work goes here.
-
-  return Response.json({ status: "ok" });
-}
-```
-
-> `CRON_SECRET` is optional — when unset, the endpoint rejects every request (the feature is disabled, same
-> pattern as Stripe/storage). The scheduler (Railway cron, GitHub Actions, etc.) must send
-> `Authorization: Bearer <CRON_SECRET>`.
+> The scheduler (Railway cron, GitHub Actions, etc.) must send the `Authorization: Bearer` header.
 
 ## Step 37 — package.json Scripts
 
@@ -982,11 +814,11 @@ export async function GET(request: Request) {
   "db:migrate": "drizzle-kit migrate",
   "db:push": "drizzle-kit push",
   "db:studio": "drizzle-kit studio",
-  "db:seed": "tsx src/db/seed.ts",
-  "email:dev": "email dev src/emails",
+  "db:seed": "tsx db/seed.ts",
+  "email:dev": "email dev emails",
   "stripe:dev": "stripe listen --forward-to localhost:3000/api/auth/stripe/webhook",
-  "auth:generate": "better-auth generate --output src/db/schema/auth.ts --yes",
-  "test": "tsx --env-file=.env src/scripts/test.ts"
+  "auth:generate": "better-auth generate --output db/schema/auth.ts --yes",
+  "test": "tsx --env-file=.env scripts/test.ts"
 }
 ```
 
@@ -995,40 +827,17 @@ export async function GET(request: Request) {
 > `stripe:dev`: forward Stripe events to the local app via the Stripe CLI (`stripe listen`). Requires `stripe login` once.
 > Railpack handles the production build and container startup — no Railway-specific build/start scripts needed.
 
-## Step 38 — `src/scripts/test.ts` (smoke test)
+## Step 38 — `scripts/test.ts` (smoke test)
 
-Verifies the environment is wired correctly after cloning. Run with `pnpm test`.
+Verifies the environment is wired correctly after cloning. Run with `pnpm test` (tsx loads `.env` via
+`--env-file`). Sequential checks, exiting non-zero on the first failure:
 
-```ts
-import { db } from "@/db";
-import { sql } from "drizzle-orm";
-import { env } from "@/lib/env";
+1. **Database** — execute `SELECT 1` through the Drizzle client.
+2. **Storage** — dynamic-import `listFiles()` from `lib/storage.ts` and call it (verifies the bucket is
+   reachable with the configured credentials).
+3. **Stripe** (optional) — if `env.STRIPE_SECRET_KEY` is set, just confirm its presence.
 
-async function main() {
-  // DB
-  await db.execute(sql`SELECT 1`);
-  console.log("✓ Database");
-
-  // Storage
-  const { listFiles } = await import("@/lib/storage");
-  await listFiles();
-  console.log("✓ Storage");
-
-  // Stripe (optional)
-  if (env.STRIPE_SECRET_KEY) {
-    // lightweight check — just confirm the secret key is present
-    console.log("✓ Stripe (secret key present)");
-  }
-
-  console.log("\nAll checks passed.");
-  process.exit(0);
-}
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
-```
+Each passing check logs a `✓` line; the script ends with "All checks passed." and `process.exit(0)`.
 
 ## Step 39 — Format and Verify
 
@@ -1044,433 +853,88 @@ pnpm lint
 
 ## Step 40 — GitHub Actions CI (`.github/workflows/ci.yml`)
 
-```yaml
-name: CI
+One `lint` job on `push`, five steps:
 
-on: [push]
-
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6 # pnpm version comes from package.json "packageManager"
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Format check
-        run: pnpm format:check
-
-      - name: Lint
-        run: pnpm lint
-```
+1. `actions/checkout@v7`
+2. `pnpm/action-setup@v6` with **no `version` input** — it reads the pnpm version from `packageManager` in
+   package.json, so it's pinned in exactly one place.
+3. `actions/setup-node@v6` with `node-version: 24` and `cache: pnpm` (pnpm must be set up first for the cache).
+4. `pnpm install --frozen-lockfile` — CI fails on lockfile drift instead of silently updating it.
+5. `pnpm format:check`, then `pnpm lint`.
 
 > `pnpm lint` already covers ESLint + Prettier-as-a-lint-rule + `tsc --noEmit` (via `postlint`); `format:check`
 > additionally verifies the files ESLint doesn't lint (Markdown, CSS, JSON, YAML).
 > No `.env` is needed: neither Prettier, ESLint, nor `tsc` executes app code, so t3-env validation never runs.
-> `pnpm/action-setup` reads the pnpm version from `packageManager` in package.json — don't pin it twice.
-> A production `next build` is deliberately not in CI — it executes `src/lib/env.ts`, which would demand real
+> A production `next build` is deliberately not in CI — it executes `lib/env.ts`, which would demand real
 > env values. Railway's deploy build (with its service variables) covers that path.
 
 ## Step 41 — AWS Infrastructure (`infra/`, Terraform)
 
-Provisions everything a project needs on AWS: a private **uploads bucket**, an **application IAM user**
-(scoped S3 access + SES send), and — in the `production` workspace only — a versioned **database-backups
-bucket** with a dedicated upload-only **backup user** (consumed by the backup service, Step 42).
+Terraform in `infra/` provisions everything a project needs on AWS, using the latest `terraform-aws-modules`
+(`s3-bucket` ~> 5.0; `iam` ~> 6.0 for both the `iam-user` and `iam-policy` submodules — no raw
+`aws_iam_policy` resources). Workspaces map to environments: `default` = dev (resources prefixed
+`<project>-dev`), `production` = production (prefixed `<project>`).
 
-Uses the latest `terraform-aws-modules` (`s3-bucket` ~> 5.0, `iam` ~> 6.0). Workspaces map to environments:
-`default` workspace = dev (resources prefixed `<project>-dev`), `production` workspace = production.
+**Layout & conventions** (`main.tf`, `variables.tf`, `terraform.tfvars`, `outputs.tf`):
 
-**`infra/main.tf`**
+- S3 backend (`nimbusit-terraform-state`, `use_lockfile`) — change the state `key` per project.
+- Single AWS provider in `us-east-1` with `default_tags` of `Project` + `Environment`.
+- Variables: `project_name` and `production_domain` (validated non-empty; scopes SES sending and S3 CORS).
+  `terraform.tfvars` holds per-project values — edit after cloning.
+- Locals: `environment` from `terraform.workspace`, `prefix` as described above.
 
-```hcl
-terraform {
-  backend "s3" {
-    region       = "us-east-1"
-    bucket       = "nimbusit-terraform-state"
-    key          = "ai-starterkit/terraform.tfstate" # change per project
-    use_lockfile = true
-  }
+**Application resources** (`app.tf`):
 
-  required_providers {
-    aws = {
-      source = "hashicorp/aws"
-    }
-  }
-}
+- **Uploads bucket** (`<prefix>-uploads`, s3-bucket module): private (default public-access block), with
+  `attach_require_latest_tls_policy` + `attach_deny_insecure_transport_policy`, and a CORS rule allowing
+  `GET`/`PUT` with `Content-Type` from `http://localhost:3000` (dev) or `https://www.<production_domain>`
+  (production) — required for the browser's direct presigned PUT/GET.
+- **App user** (`<prefix>-app`, iam-user module, no login profile) with two policies via the iam-policy module
+  (policy documents authored as `data.aws_iam_policy_document`):
+  - `<prefix>-app-s3-access` — `s3:*` on the uploads bucket and its objects only.
+  - `<prefix>-app-ses-send` — `ses:SendEmail` + `ses:SendRawEmail` on `*`, conditioned to
+    `ses:FromAddress` matching `*@<production_domain>`.
 
-locals {
-  environment = terraform.workspace == "default" ? "dev" : terraform.workspace
-  prefix      = local.environment == "production" ? var.project_name : "${var.project_name}-${local.environment}"
-}
+**Backup resources** (`backups.tf`, created only when `environment == "production"` via `count`):
 
-provider "aws" {
-  region = "us-east-1"
+- **Backups bucket** (`<prefix>-database-backups`): versioned, AES256 server-side encryption, TLS policies as
+  above, and a lifecycle rule — current versions expire after 30 days, noncurrent after 1 day (each backup is a
+  uniquely named object, so this is the retention mechanism; the backup container never deletes).
+- **Backup user** (`<prefix>-database-backup`, no login profile) with a single policy allowing only
+  `s3:PutObject` on the backups bucket's objects.
 
-  default_tags {
-    tags = {
-      Project     = var.project_name
-      Environment = local.environment
-    }
-  }
-}
+**Outputs**: `aws_region`, app user `access_key_id` / `access_key_secret` (sensitive), `bucket_id`,
+`ses_from_email` (`no-reply@<production_domain>`), and the production-only `backups_bucket_id` /
+`backup_user_access_key_id` / `backup_user_access_key_secret` (null in dev).
 
-data "aws_region" "current" {}
-```
-
-**`infra/variables.tf`**
-
-```hcl
-variable "project_name" {
-  description = "The base name of the project, used to prefix and namespace resources."
-  type        = string
-}
-
-variable "production_domain" {
-  description = "Apex production domain for the project (without www). Used for SES email and S3 CORS."
-  type        = string
-
-  validation {
-    condition     = length(var.production_domain) > 0
-    error_message = "A production domain is required to scope SES sending and S3 CORS."
-  }
-}
-```
-
-**`infra/terraform.tfvars`**
-
-```hcl
-# Edit per project.
-project_name      = "ai-starterkit"
-production_domain = "example.com"
-```
-
-**`infra/app.tf`**
-
-```hcl
-# Application resources: private uploads bucket + IAM user for the app service.
-# The app serves files exclusively through presigned URLs, so the bucket stays
-# private; CORS is required for the browser's direct presigned PUT/GET.
-
-module "uploads_bucket" {
-  source  = "terraform-aws-modules/s3-bucket/aws"
-  version = "~> 5.0"
-
-  bucket = "${local.prefix}-uploads"
-
-  attach_require_latest_tls_policy      = true
-  attach_deny_insecure_transport_policy = true
-
-  cors_rule = jsonencode([{
-    allowed_origins = local.environment == "production" ? ["https://www.${var.production_domain}"] : ["http://localhost:3000"]
-    allowed_methods = ["GET", "PUT"]
-    allowed_headers = ["Content-Type"]
-    max_age_seconds = 3600
-  }])
-}
-
-module "app_user" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-user"
-  version = "~> 6.0"
-
-  name                 = "${local.prefix}-app"
-  create_login_profile = false
-
-  policies = {
-    s3_access  = module.app_user_s3_policy.arn
-    ses_access = module.app_user_ses_policy.arn
-  }
-}
-
-data "aws_iam_policy_document" "app_user_s3" {
-  statement {
-    effect  = "Allow"
-    actions = ["s3:*"]
-    resources = [
-      module.uploads_bucket.s3_bucket_arn,
-      "${module.uploads_bucket.s3_bucket_arn}/*",
-    ]
-  }
-}
-
-module "app_user_s3_policy" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-policy"
-  version = "~> 6.0"
-
-  name        = "${local.prefix}-app-s3-access"
-  description = "Provides full access to the ${local.prefix}-uploads S3 bucket"
-  policy      = data.aws_iam_policy_document.app_user_s3.json
-}
-
-data "aws_iam_policy_document" "app_user_ses" {
-  statement {
-    effect = "Allow"
-    actions = [
-      "ses:SendEmail",
-      "ses:SendRawEmail",
-    ]
-    resources = ["*"]
-
-    condition {
-      test     = "StringLike"
-      variable = "ses:FromAddress"
-      values   = ["*@${var.production_domain}"]
-    }
-  }
-}
-
-module "app_user_ses_policy" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-policy"
-  version = "~> 6.0"
-
-  name        = "${local.prefix}-app-ses-send"
-  description = "Allows the application user to send email through SES for ${var.production_domain}"
-  policy      = data.aws_iam_policy_document.app_user_ses.json
-}
-```
-
-**`infra/backups.tf`**
-
-```hcl
-# Database backup resources: versioned bucket + a dedicated upload-only IAM user
-# for the backup container (see ../backup). Created only in the production
-# workspace — dev databases don't need backups.
-
-locals {
-  create_backup_resources = local.environment == "production"
-  backups_bucket_name     = "${local.prefix}-database-backups"
-}
-
-module "backups_bucket" {
-  count   = local.create_backup_resources ? 1 : 0
-  source  = "terraform-aws-modules/s3-bucket/aws"
-  version = "~> 5.0"
-
-  bucket = local.backups_bucket_name
-
-  attach_require_latest_tls_policy      = true
-  attach_deny_insecure_transport_policy = true
-
-  versioning = {
-    enabled = true
-  }
-
-  server_side_encryption_configuration = {
-    rule = {
-      apply_server_side_encryption_by_default = {
-        sse_algorithm = "AES256"
-      }
-    }
-  }
-
-  # Retention: keep 30 days of dumps. Each backup is a uniquely named object, so
-  # current-version expiration removes old dumps; noncurrent expiration cleans up
-  # the versions left behind by versioning + expiration delete markers.
-  lifecycle_rule = [
-    {
-      id      = "expire-old-backups"
-      enabled = true
-      filter  = {}
-
-      expiration = {
-        days = 30
-      }
-
-      noncurrent_version_expiration = {
-        days = 1
-      }
-    }
-  ]
-}
-
-module "backup_user" {
-  count   = local.create_backup_resources ? 1 : 0
-  source  = "terraform-aws-modules/iam/aws//modules/iam-user"
-  version = "~> 6.0"
-
-  name                 = "${local.prefix}-database-backup"
-  create_login_profile = false
-
-  policies = {
-    s3_write = module.backup_user_s3_policy[0].arn
-  }
-}
-
-data "aws_iam_policy_document" "backup_user_s3" {
-  count = local.create_backup_resources ? 1 : 0
-
-  statement {
-    sid    = "AllowBackupUpload"
-    effect = "Allow"
-
-    actions = [
-      "s3:PutObject",
-    ]
-
-    resources = [
-      "arn:aws:s3:::${local.backups_bucket_name}/*",
-    ]
-  }
-}
-
-module "backup_user_s3_policy" {
-  count   = local.create_backup_resources ? 1 : 0
-  source  = "terraform-aws-modules/iam/aws//modules/iam-policy"
-  version = "~> 6.0"
-
-  name        = "${local.prefix}-database-backup-s3-write"
-  description = "Allows the backup container to upload database dumps to S3."
-  policy      = data.aws_iam_policy_document.backup_user_s3[0].json
-}
-```
-
-**`infra/outputs.tf`**
-
-```hcl
-output "aws_region" {
-  description = "AWS region all resources live in."
-  value       = data.aws_region.current.region
-}
-
-output "access_key_id" {
-  description = "AWS IAM Access Key ID for the application user."
-  value       = module.app_user.access_key_id
-}
-
-output "access_key_secret" {
-  description = "AWS IAM Secret Access Key for the application user."
-  value       = module.app_user.access_key_secret
-  sensitive   = true
-}
-
-output "bucket_id" {
-  description = "The name/ID of the uploads S3 bucket."
-  value       = module.uploads_bucket.s3_bucket_id
-}
-
-output "ses_from_email" {
-  description = "Default From address for SES email delivery."
-  value       = "no-reply@${var.production_domain}"
-}
-
-output "backups_bucket_id" {
-  description = "The name/ID of the database backups S3 bucket (production only)."
-  value       = local.create_backup_resources ? module.backups_bucket[0].s3_bucket_id : null
-}
-
-output "backup_user_access_key_id" {
-  description = "AWS access key ID for the backup container (production only)."
-  value       = local.create_backup_resources ? module.backup_user[0].access_key_id : null
-}
-
-output "backup_user_access_key_secret" {
-  description = "AWS secret access key for the backup container (production only)."
-  value       = local.create_backup_resources ? module.backup_user[0].access_key_secret : null
-  sensitive   = true
-}
-```
-
-Also add to `.gitignore`:
-
-```
-# terraform
-infra/.terraform/
-*.tfstate*
-.env.infra
-```
+Also add to `.gitignore`: `infra/.terraform/`, `*.tfstate*`, `.env.infra` — and **commit**
+`infra/.terraform.lock.hcl`.
 
 **`infra/README.md`** documents the apply flow and a quick script that writes the app outputs to
 `../.env.infra` (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `BUCKET_NAME`, `EMAIL_FROM`)
 for copying into `.env`.
 
-> Edit `terraform.tfvars` and the backend `key` in `main.tf` per project. `terraform init && terraform apply`
-> for dev; `terraform workspace new production && terraform apply` for production.
+> `terraform init && terraform apply` for dev; `terraform workspace new production && terraform apply` for
+> production.
 > SES **verification** is not provisioned — verify the domain in the SES console and request production access.
-> The uploads bucket stays private; CORS allows the browser's presigned PUT/GET from localhost (dev) or
-> `https://www.<production_domain>` (production).
 
 ## Step 42 — Database backup service (`backup/`)
 
-A minimal Railway cron container: `pg_dump | gzip | aws s3 cp` to the backups bucket, once a day. Retention is
-the bucket's lifecycle rule (30 days, Step 41) — the container only ever uploads.
+A minimal Railway cron container in `backup/`: dump the database, upload to S3, exit. Retention is the backups
+bucket's lifecycle rule (Step 41) — the container only ever uploads, never lists or deletes.
 
-**`backup/Dockerfile`**
-
-```dockerfile
-# syntax=docker/dockerfile:1
-
-# pg_dump must match the server major version (Postgres 18 on Railway). The
-# official postgres image ships the exact client; aws-cli (v2) is in the Alpine
-# community repo. This image runs once per Railway cron tick and exits.
-FROM postgres:18-alpine
-
-RUN apk add --no-cache aws-cli
-
-COPY backup.sh /usr/local/bin/backup.sh
-RUN chmod +x /usr/local/bin/backup.sh
-
-ENTRYPOINT ["/usr/local/bin/backup.sh"]
-```
-
-**`backup/backup.sh`**
-
-```sh
-#!/bin/sh
-set -eu
-
-: "${DATABASE_URL:?DATABASE_URL is required}"
-: "${BACKUP_BUCKET:?BACKUP_BUCKET is required}"
-
-timestamp="$(date -u +%Y/%m/%d/%Y-%m-%dT%H-%M-%SZ)"
-key="db/${timestamp}.sql.gz"
-tmp="/tmp/backup.sql.gz"
-
-echo "Dumping database to ${tmp} ..."
-pg_dump --no-owner --no-privileges "$DATABASE_URL" | gzip -9 >"$tmp"
-
-size="$(wc -c <"$tmp" | tr -d ' ')"
-if [ "$size" -lt 100 ]; then
-  echo "Dump is suspiciously small (${size} bytes); aborting without upload." >&2
-  exit 1
-fi
-
-echo "Uploading ${size} bytes to s3://${BACKUP_BUCKET}/${key} ..."
-aws s3 cp "$tmp" "s3://${BACKUP_BUCKET}/${key}" --only-show-errors
-
-echo "Backup complete: s3://${BACKUP_BUCKET}/${key}"
-```
-
-**`backup/railway.json`**
-
-```json
-{
-  "$schema": "https://railway.com/railway.schema.json",
-  "build": {
-    "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile",
-    "watchPatterns": ["backup/**"]
-  },
-  "deploy": {
-    "cronSchedule": "0 6 * * *",
-    "restartPolicyType": "NEVER"
-  }
-}
-```
+- **`Dockerfile`** — `FROM postgres:18-alpine` (pg_dump must match the server's major version) plus
+  `apk add aws-cli`; copies in `backup.sh` as the entrypoint.
+- **`backup.sh`** (`set -eu`; requires `DATABASE_URL` and `BACKUP_BUCKET`):
+  `pg_dump --no-owner --no-privileges | gzip -9` to a temp file, **abort if the dump is under 100 bytes**
+  (suspiciously small), then `aws s3 cp` to `s3://$BACKUP_BUCKET/db/YYYY/MM/DD/<ISO-timestamp>.sql.gz`.
+- **`railway.json`** — `DOCKERFILE` builder with `watchPatterns: ["backup/**"]`, `cronSchedule: "0 6 * * *"`
+  (daily 06:00 UTC), `restartPolicyType: "NEVER"` (run-and-exit).
 
 Deploy as a second Railway service with root directory `backup/`, connected to the same repo. Set its variables
 from the production Terraform outputs: `DATABASE_URL` (reference the Postgres service — private network),
 `BACKUP_BUCKET`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (the **backup** user, not the app user), and
-`AWS_DEFAULT_REGION`. The `cronSchedule` (daily 06:00 UTC) and `restartPolicyType: NEVER` make it run-and-exit.
+`AWS_REGION`.
 
 ## Step 43 — Deployment on Railway
 
@@ -1529,7 +993,12 @@ the same service variables locally.
 
 ## Step 44 — `AGENTS.md`
 
-Create `AGENTS.md` at the repo root (replace or augment the one `create-next-app` scaffolds, if any). It needs two things only:
+Create `AGENTS.md` at the repo root (replace the one `create-next-app` scaffolds, if any). It is built from a
+base plus two project sections:
+
+**Base — behavioral guidelines.** Copy the contents of
+https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md (retitled to `AGENTS.md`): four rules
+for LLM coding discipline — Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution.
 
 **1. Pointer to stack reference:**
 
@@ -1554,6 +1023,13 @@ See `STACK.md` for the full stack setup guide, conventions, and key gotchas.
 | **react-email**       | https://react.email/docs/llms.txt     |
 
 > Do not duplicate content from `STACK.md` here — point to it instead.
+
+Finally, create a `CLAUDE.md` at the repo root whose entire content is one import line, so Claude Code loads
+the same instructions:
+
+```md
+@AGENTS.md
+```
 
 ## Step 45 — AI Configuration (Skills)
 
@@ -1621,17 +1097,17 @@ pnpm dlx skills add next-safe-action/skills
 
 14. **Sonner + next-themes** — `<Toaster />` from `@/components/ui/sonner` uses `useTheme`. Wrap root layout with `<ThemeProvider attribute="class">` before `<TooltipProvider>`. Add `suppressHydrationWarning` to `<html>` to silence theme hydration mismatch.
 
-15. **Todos feature** — demo scaffolding only. Delete `src/features/todos/` and `src/app/dashboard/todos/` once you've internalized the FSD pattern. Do not ship it.
+15. **Todos feature** — demo scaffolding only. Delete `features/todos/` and `app/dashboard/todos/` once you've internalized the FSD pattern. Do not ship it.
 
-16. **getBaseUrl** — lives in `src/lib/utils.ts`, reads `BETTER_AUTH_URL` on the server. No platform-specific env var needed. Always set `BETTER_AUTH_URL` in production.
+16. **getBaseUrl** — lives in `lib/utils.ts`, reads `BETTER_AUTH_URL` on the server. No platform-specific env var needed. Always set `BETTER_AUTH_URL` in production.
 
 17. **Railpack** — auto-detects Next.js and handles the production build and container startup with the default `next.config.ts` (no `output: "standalone"` needed). Do not add `build:railway` or `start:railway` scripts; the standard `pnpm build` and `pnpm start` are sufficient for local use.
 
-18. **`verifySession`** — exported from `src/lib/auth.ts`, wrapped in React `cache()`. Called in both the dashboard layout (for sidebar user info) and each protected page (auth guard). Cache deduplicates — one DB hit per request regardless of how many times it's called.
+18. **`verifySession`** — exported from `lib/auth.ts`, wrapped in React `cache()`. Called in both the dashboard layout (for sidebar user info) and each protected page (auth guard). Cache deduplicates — one DB hit per request regardless of how many times it's called.
 
-19. **`src/lib/constants.ts`** — only `APP_NAME`. Do not add runtime values (those go in `src/lib/env.ts`). First thing to update after cloning.
+19. **`lib/constants.ts`** — only `APP_NAME`. Do not add runtime values (those go in `lib/env.ts`). First thing to update after cloning.
 
-20. **Shared schemas** — define Zod schemas in `src/features/<name>/schemas.ts`. Import them in both the safe action (`input: schema`) and the form (`resolver: zodResolver(schema)`). Never duplicate schemas.
+20. **Shared schemas** — define Zod schemas in `features/<name>/schemas.ts`. Import them in both the safe action (`input: schema`) and the form (`resolver: zodResolver(schema)`). Never duplicate schemas.
 
 21. **Optimistic updates** — use `useOptimisticAction` for toggle (instant feedback) and `useAction` for create (multi-step upload flow). Do not use `useOptimisticAction` for actions with async side effects like file uploads.
 
@@ -1639,11 +1115,11 @@ pnpm dlx skills add next-safe-action/skills
 
 23. **`next-themes`** — install explicitly (`pnpm add next-themes`). Do not rely on it being pulled in transitively by shadcn.
 
-24. **Stripe client** — initialized in `src/lib/auth.ts` as `const stripeClient = env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET ? new Stripe(...) : null`. The `stripe` package must be in production deps. Subscription "active" checks include `trialing`, not just `active` (see `isSubscribed` / `proActionClient`).
+24. **Stripe client** — initialized in `lib/auth.ts` as `const stripeClient = env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET ? new Stripe(...) : null`. The `stripe` package must be in production deps. Subscription "active" checks include `trialing`, not just `active` (see `isSubscribed` / `proActionClient`).
 
-25. **Server errors are masked by default** — next-safe-action replaces thrown error messages with a generic string. Throw `new ActionError("...")` (from `src/lib/safe-action.ts`) for any message the user should actually see in a toast; plain `Error`s stay masked.
+25. **Server errors are masked by default** — next-safe-action replaces thrown error messages with a generic string. Throw `new ActionError("...")` (from `lib/safe-action.ts`) for any message the user should actually see in a toast; plain `Error`s stay masked.
 
-26. **Empty env vars count as unset** — `emptyStringAsUndefined: true` in `src/lib/env.ts` means `VAR=""` fails required-var validation at boot and disables optional features cleanly. Don't "temporarily" set a required var to `""` expecting the app to boot.
+26. **Empty env vars count as unset** — `emptyStringAsUndefined: true` in `lib/env.ts` means `VAR=""` fails required-var validation at boot and disables optional features cleanly. Don't "temporarily" set a required var to `""` expecting the app to boot.
 
 27. **CLI packages** — `shadcn` (prod dep) provides the pinned `pnpm shadcn` CLI; `auth` (dev dep) is the Better Auth CLI providing the `better-auth` binary for `auth:generate`. Both are required — do not remove them as "unused".
 

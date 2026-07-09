@@ -37,7 +37,7 @@ terraform workspace select production
 BACKUP_BUCKET=$(terraform output -raw backups_bucket_id)
 AWS_ACCESS_KEY_ID=$(terraform output -raw backup_user_access_key_id)
 AWS_SECRET_ACCESS_KEY=$(terraform output -raw backup_user_access_key_secret)
-AWS_DEFAULT_REGION=$(terraform output -raw aws_region)
+AWS_REGION=$(terraform output -raw aws_region)
 ```
 
 ### SES identity

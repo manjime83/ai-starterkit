@@ -10,7 +10,7 @@
 #   BACKUP_BUCKET         destination S3 bucket name
 #   AWS_ACCESS_KEY_ID     credentials for the dedicated backup IAM user
 #   AWS_SECRET_ACCESS_KEY
-#   AWS_DEFAULT_REGION    e.g. us-east-1
+#   AWS_REGION            e.g. us-east-1
 set -eu
 
 : "${DATABASE_URL:?DATABASE_URL is required}"
