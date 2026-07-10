@@ -465,9 +465,9 @@ export const auth = betterAuth({
 > across Railway instances, at the cost of a DB write per authenticated request. It stores counters in a
 > `rateLimits` table (plural, per `usePlural`); run `pnpm auth:generate` to add it to `db/schema/auth.ts`, then
 > `db:generate` + `db:migrate`.
-> Keep better-auth's built-in per-path defaults — no `customRules`. They already apply a stricter window to the
-> sign-in paths than to ordinary requests, and hand-tuned limits are the kind of thing that silently locks out
-> real users. Tighten per project only after watching real traffic.
+> The general limiter covers every auth endpoint, magic link included — no `customRules`. Per-path limits are
+> easy to tune into a state that silently locks out real users; add them per project, after watching real
+> traffic, not up front.
 > The plugin handles checkout, the Stripe billing portal, **and** webhook persistence to the `subscriptions` table for you — no manual webhook handler. It mounts its own webhook endpoint at `/api/auth/stripe/webhook` (under the better-auth catch-all).
 > `createCustomerOnSignUp: true` creates a Stripe customer on every new sign-up and stores its id on `users.stripeCustomerId`.
 > Add a plan to the `plans` array for each Stripe Price you sell. `name` ("pro") is what the client passes to `subscription.upgrade({ plan })`.
@@ -805,6 +805,22 @@ Preview templates with `pnpm email:dev` (react-email dev server) — no SES acco
 > start in **sandbox mode**, where recipients must also be verified — request production access before real users
 > sign in via magic link. Actual sends (including local dev sign-ins) go through the real SES API.
 
+**Deliverability checklist (manual, once per domain).** Magic link *is* the auth method here: an email in the
+spam folder is a user who cannot sign in. Terraform does not provision any of this — do it by hand before
+launch.
+
+1. **Verify the domain** in the SES console (not just the single `EMAIL_FROM` address).
+2. **Enable Easy DKIM** and publish the three `CNAME` records SES gives you at your DNS provider. Wait for the
+   identity to show *Verified*.
+3. **Publish an SPF record** — a `TXT` on the domain including `include:amazonses.com`. If you already have an
+   SPF record, add the include to it; two SPF records is a hard fail, not a merge.
+4. **Publish a DMARC record** — `TXT` at `_dmarc.<domain>`, starting at `v=DMARC1; p=none; rua=mailto:...`.
+   Start with `p=none` so you observe before you enforce, then tighten to `quarantine` once reports look clean.
+5. **Request production access** to leave the sandbox.
+
+> SPF alone does not survive forwarding, and DMARC needs at least one of SPF or DKIM to align with the From
+> domain. DKIM is the one that matters — do not skip step 2.
+
 ## Step 34 — AWS S3 Object Storage (`lib/storage.ts`)
 
 Thin wrappers around `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` against the private uploads bucket —
@@ -855,6 +871,23 @@ A stub `GET` endpoint for scheduled jobs, empty by default — add project-speci
   `Authorization: Bearer <CRON_SECRET>` (unset secret = endpoint disabled, same optional-feature pattern as
   Stripe).
 - Otherwise runs the scheduled work and returns `{ status: "ok" }`.
+
+**Wiring the scheduler.** The endpoint does nothing until something calls it. Add a Railway **cron service** —
+the same shape as the backup container (Step 42), so the pattern is already familiar:
+
+- A service in the same project, `restartPolicyType: "NEVER"` (run and exit), with a `cronSchedule`.
+- Its only job is one authenticated request:
+
+  ```bash
+  curl -fsS -X GET "$APP_URL/api/cron" -H "Authorization: Bearer $CRON_SECRET"
+  ```
+
+- Variables: `APP_URL` (reference the app service's domain) and `CRON_SECRET` — the **same value** the app has,
+  or every call 401s.
+
+> `-f` matters: without it `curl` exits 0 on a 500 and the failed job looks like a success in Railway's logs.
+> Keep `CRON_SECRET` blank until you actually have scheduled work — the endpoint stays disabled and returns 401
+> to everyone, including a scheduler you forgot you wired up.
 
 > The scheduler (Railway cron, GitHub Actions, etc.) must send the `Authorization: Bearer` header.
 
@@ -937,6 +970,10 @@ One `lint` job on `push`, five steps:
 
 > No separate `pnpm format:check` step: `pnpm lint` already covers ESLint + Prettier-as-a-lint-rule +
 > `tsc --noEmit` (via `postlint`).
+> `node-version: 24` pins **CI only** — it is not authoritative. There is deliberately no `engines` field and no
+> `.nvmrc`: Railpack chooses Node in production and your shell chooses it locally. Unlike pnpm (which
+> `packageManager` pins everywhere, Step 37), the Node version can drift across the three environments. Add
+> `engines` per project if that ever bites.
 > No `.env` is needed: neither Prettier, ESLint, nor `tsc` executes app code, so t3-env validation never runs.
 > A production `next build` is deliberately not in CI — it executes `lib/env.ts`, which would demand real
 > env values. Railway's deploy build (with its service variables) covers that path.
@@ -950,7 +987,9 @@ Terraform in `infra/` provisions everything a project needs on AWS, using the la
 
 **Layout & conventions** (`main.tf`, `variables.tf`, `terraform.tfvars`, `outputs.tf`):
 
-- S3 backend (`nimbusit-terraform-state`, `use_lockfile`) — change the state `key` per project.
+- S3 backend (`nimbusit-terraform-state`, `use_lockfile`) — change the state `key` per project. The bucket name
+  is **intentionally org-specific**: it is an existing bucket in this AWS account, created once and shared by
+  every project. Forking this kit into another org means pointing the backend at your own state bucket.
 - Single AWS provider in `us-east-1` with `default_tags` of `Project` + `Environment`.
 - Variables: `project_name` and `production_domain` (validated non-empty; scopes SES sending and S3 CORS).
   `terraform.tfvars` holds per-project values — edit after cloning.
@@ -1227,4 +1266,10 @@ pnpm dlx skills add next-safe-action/skills
 
 35. **Postgres major version is pinned in three places** — `compose.yaml` (Step 10), the backup container's base image (Step 42), and the Railway Postgres service. They must agree: `pg_dump` refuses to dump a server newer than itself. Never use `postgres:latest`.
 
-36. **Rate limiting is on and DB-backed** — `rateLimit: { enabled: true, storage: "database" }` in `lib/auth.ts`. better-auth's default is memory storage and production-only, which means no protection in dev and per-instance limits in production. Keep the built-in per-path defaults; don't hand-tune `customRules`. The `rateLimits` table comes from `pnpm auth:generate`.
+36. **Rate limiting is on and DB-backed** — `rateLimit: { enabled: true, storage: "database" }` in `lib/auth.ts`. better-auth's default is memory storage and production-only, which means no protection in dev and per-instance limits in production. The general limiter covers every auth endpoint including magic link; do not add `customRules`. The `rateLimits` table comes from `pnpm auth:generate`.
+
+37. **`/api/cron` needs a scheduler** — the endpoint is inert on its own. A Railway cron service curls it with the Bearer header (Step 36). `CRON_SECRET` must be identical on both services, and blank on the app means the endpoint 401s everyone.
+
+38. **Node is not pinned** — `node-version: 24` governs CI only. No `engines`, no `.nvmrc`; Railpack picks Node in production. This is deliberate, and it is the one version in the stack that can drift.
+
+39. **DKIM before launch** — magic link is the auth method, so an unsigned sending domain means users who cannot sign in. Verify the domain, enable Easy DKIM, publish SPF + DMARC, leave the sandbox (Step 33). Terraform provisions none of it.
