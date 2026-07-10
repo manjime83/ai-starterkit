@@ -17,14 +17,14 @@
 | ID generation   | @paralleldrive/cuid2                                  |
 | Env validation  | @t3-oss/env-nextjs                                    |
 | Email           | Amazon SES (`@aws-sdk/client-sesv2`) + react-email v6 |
-| Object storage  | AWS S3 + AWS SDK v3                                   |
+| Object storage  | Any S3-compatible bucket + AWS SDK v3                 |
 | Formatting      | Prettier (organize-imports + tailwindcss plugins)     |
 | Linting         | ESLint v9 flat config + drizzle + prettier            |
 | TypeScript base | @tsconfig/strictest + @tsconfig/next                  |
 | Script runner   | tsx                                                   |
 | Dev concurrency | concurrently                                          |
-| Local services  | Docker Compose (Postgres)                             |
-| CI              | GitHub Actions (format check + lint)                  |
+| Local services  | Docker Compose (Postgres 18)                          |
+| CI              | GitHub Actions (lint + types)                         |
 | Infrastructure  | Terraform (`terraform-aws-modules`)                   |
 | DB backups      | Railway cron container (pg_dump → S3)                 |
 | Deployment      | Railway (Railpack + Postgres)                         |
@@ -146,12 +146,21 @@ BETTER_AUTH_SECRET="" # generate: openssl rand -base64 32
 BETTER_AUTH_URL="http://localhost:3000"
 GOOGLE_CLIENT_ID=""
 GOOGLE_CLIENT_SECRET=""
-EMAIL_FROM="" # must be a verified SES identity (address or domain)
 
-# AWS — one key pair for SES (email) and S3 (storage)
-AWS_REGION="us-east-1"
-AWS_ACCESS_KEY_ID=""
-AWS_SECRET_ACCESS_KEY=""
+# Email — Amazon SES, with its own IAM user (ses:SendEmail only).
+EMAIL_FROM="" # must be a verified SES identity (address or domain)
+SES_REGION="us-east-1"
+SES_ACCESS_KEY_ID=""
+SES_SECRET_ACCESS_KEY=""
+
+# Object storage — the uploads bucket from infra/ (Step 41), with its own IAM user.
+BUCKET_REGION="us-east-1"
+BUCKET_ACCESS_KEY_ID=""
+BUCKET_SECRET_ACCESS_KEY=""
+BUCKET_NAME=""
+# Leave both blank for AWS S3. Set them to point at any S3-compatible host (e.g. Railway buckets).
+BUCKET_ENDPOINT=""
+BUCKET_FORCE_PATH_STYLE="" # "true" for hosts that address buckets by path instead of subdomain
 
 # Optional — cron endpoint auth. Leave blank to disable /api/cron entirely. Generate like BETTER_AUTH_SECRET.
 CRON_SECRET=""
@@ -160,18 +169,13 @@ CRON_SECRET=""
 STRIPE_SECRET_KEY=""
 STRIPE_WEBHOOK_SECRET=""
 STRIPE_PRICE_ID=""
-
-# S3 object storage — bucket name defaults to "uploads"; set BUCKET_NAME to override.
-# BUCKET_ENDPOINT="" # only for non-AWS S3-compatible hosts (e.g. MinIO)
-# BUCKET_FORCE_PATH_STYLE="true" # only for S3 hosts that need path-style URLs (e.g. MinIO)
-# BUCKET_NAME="uploads"
 ```
 
 > Empty strings count as **unset** (see `emptyStringAsUndefined` in Step 9): the app refuses to boot until the
-> required vars are filled in. Fill `DATABASE_URL`, `BETTER_AUTH_SECRET`, the Google OAuth pair, and the AWS
-> credentials first.
-> The AWS key pair is shared by SES (email) and S3 (storage) — one IAM user with `ses:SendEmail` plus scoped S3
-> access to the project bucket.
+> required vars are filled in. Every var above except the Stripe and cron block is required.
+> SES and the uploads bucket each get their **own IAM user and key pair** (Step 41) — a leaked storage key
+> cannot send mail, and a leaked mail key cannot touch the bucket. `BUCKET_NAME` has no default: point it at the
+> bucket Terraform provisioned for this environment.
 > For local development, `docker compose up -d` (Step 10) provides Postgres — the `DATABASE_URL` default above
 > already points at it. Storage and email use real AWS (dev bucket + SES) in every environment.
 
@@ -179,8 +183,8 @@ STRIPE_PRICE_ID=""
 
 Validate all env vars with Zod v4. Use `z.url()` and `z.email()` directly (not `z.string().url()` — deprecated in Zod v4).
 
-Mark the Stripe vars as optional — they are runtime-guarded and their absence disables billing. The AWS
-credentials are **required** (SES needs them for magic-link email), and `BUCKET_NAME` defaults to `"uploads"`:
+Mark the Stripe vars as optional — they are runtime-guarded and their absence disables billing. Both AWS key
+pairs are **required**: SES sends the magic-link email, and storage has no fallback bucket.
 
 ```ts
 // Required
@@ -189,26 +193,35 @@ BETTER_AUTH_SECRET: z.string().min(32),
 BETTER_AUTH_URL: z.url(),
 GOOGLE_CLIENT_ID: z.string(),
 GOOGLE_CLIENT_SECRET: z.string(),
-EMAIL_FROM: z.email(),
 
-// AWS — shared by SES and S3 storage
-AWS_REGION: z.string(),
-AWS_ACCESS_KEY_ID: z.string(),
-AWS_SECRET_ACCESS_KEY: z.string(),
+// Email — Amazon SES
+EMAIL_FROM: z.email(),
+SES_REGION: z.string(),
+SES_ACCESS_KEY_ID: z.string(),
+SES_SECRET_ACCESS_KEY: z.string(),
+
+// Object storage — S3 or any S3-compatible bucket
+BUCKET_REGION: z.string(),
+BUCKET_ACCESS_KEY_ID: z.string(),
+BUCKET_SECRET_ACCESS_KEY: z.string(),
+BUCKET_NAME: z.string(),
+
+// Optional — non-AWS S3-compatible hosts only
+BUCKET_ENDPOINT: z.url().optional(),
+BUCKET_FORCE_PATH_STYLE: z.stringbool().default(false),
 
 // Optional — cron endpoint auth
-CRON_SECRET: z.string().optional(),
+CRON_SECRET: z.string().min(32).optional(),
 
 // Optional — Stripe
 STRIPE_SECRET_KEY: z.string().optional(),
 STRIPE_WEBHOOK_SECRET: z.string().optional(),
 STRIPE_PRICE_ID: z.string().optional(),
-
-// Object storage
-BUCKET_NAME: z.string().default("uploads"),
-BUCKET_ENDPOINT: z.url().optional(),
-BUCKET_FORCE_PATH_STYLE: z.stringbool().default(false),
 ```
+
+> Never name these `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: the AWS SDK's default credential chain picks
+> those up from the environment implicitly, which would silently let either client authenticate with the other's
+> key. The `SES_*` / `BUCKET_*` prefixes force both clients to be handed credentials explicitly.
 
 And set `emptyStringAsUndefined` on the `createEnv` call:
 
@@ -226,23 +239,27 @@ export const env = createEnv({
 ```
 
 > `emptyStringAsUndefined: true` makes `VAR=""` count as unset: required vars fail fast at boot instead of
-> booting with broken auth, and the optional Stripe/AWS guards (`env.STRIPE_SECRET_KEY && ...`) behave cleanly.
+> booting with broken auth, and the optional Stripe guards (`env.STRIPE_SECRET_KEY && ...`) behave cleanly.
 
 ## Step 10 — compose.yaml (local development)
 
 A single service for local development. Compose reads `./.env` automatically for `${VAR}` interpolation, and
 all state lives under `./.data` (add `/.data` to `.gitignore`).
 
-- **postgres** — `postgres:latest` on port 5432, data mounted at `./.data/postgres:/var/lib/postgresql`.
+- **postgres** — `postgres:18-alpine` on port 5432, data mounted at `./.data/postgres:/var/lib/postgresql`.
   Credentials interpolate with overridable defaults — `${POSTGRES_USER:-postgres}`,
   `${POSTGRES_PASSWORD:-postgres}`, `${POSTGRES_DB:-app}` — plus a `pg_isready` healthcheck.
+
+> Pin the major version — never `postgres:latest`. This tag must match the backup container's base image
+> (Step 42) and the Railway Postgres service, because `pg_dump` refuses to dump a server newer than itself.
+> Bump all three together, on purpose.
 
 Start with `docker compose up -d`; the `.env.example` default
 `DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app"` already points at it.
 
 > There is no local S3 emulator: storage talks to real AWS S3 in every environment. Use the dev bucket the
-> Terraform `default` workspace provisions (`<project>-dev-uploads`, Step 41) with the app user's credentials.
-> Email likewise goes through real SES in dev.
+> Terraform `default` workspace provisions (`<project>-dev-uploads`, Step 41) with the dev storage user's
+> credentials. Email likewise goes through real SES in dev.
 
 ## Step 11 — next.config.ts
 
@@ -412,6 +429,10 @@ export const auth = betterAuth({
       generateId: ({ size }) => init({ length: size ?? 24 })(),
     },
   },
+  rateLimit: {
+    enabled: true,
+    storage: "database", // survives restarts and holds across multiple instances
+  },
   socialProviders: {
     google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET },
   },
@@ -438,6 +459,15 @@ export const auth = betterAuth({
 });
 ```
 
+> **Rate limiting** is not optional here: without it, anyone can POST an arbitrary email to the magic-link
+> endpoint in a loop, burning your SES sending quota and spamming a stranger's inbox. better-auth's own default
+> is memory storage and **production-only** — `storage: "database"` makes limits survive restarts and hold
+> across Railway instances, at the cost of a DB write per authenticated request. It stores counters in a
+> `rateLimits` table (plural, per `usePlural`); run `pnpm auth:generate` to add it to `db/schema/auth.ts`, then
+> `db:generate` + `db:migrate`.
+> Keep better-auth's built-in per-path defaults — no `customRules`. They already apply a stricter window to the
+> sign-in paths than to ordinary requests, and hand-tuned limits are the kind of thing that silently locks out
+> real users. Tighten per project only after watching real traffic.
 > The plugin handles checkout, the Stripe billing portal, **and** webhook persistence to the `subscriptions` table for you — no manual webhook handler. It mounts its own webhook endpoint at `/api/auth/stripe/webhook` (under the better-auth catch-all).
 > `createCustomerOnSignUp: true` creates a Stripe customer on every new sign-up and stores its id on `users.stripeCustomerId`.
 > Add a plan to the `plans` array for each Stripe Price you sell. `name` ("pro") is what the client passes to `subscription.upgrade({ plan })`.
@@ -538,7 +568,11 @@ import { createSafeActionClient, DEFAULT_SERVER_ERROR_MESSAGE } from "next-safe-
 export class ActionError extends Error {}
 
 export const actionClient = createSafeActionClient({
-  handleServerError: (e) => (e instanceof ActionError ? e.message : DEFAULT_SERVER_ERROR_MESSAGE),
+  handleServerError: (e) => {
+    if (e instanceof ActionError) return e.message;
+    console.error(e); // unexpected: log the real error before masking it
+    return DEFAULT_SERVER_ERROR_MESSAGE;
+  },
 });
 
 export const authActionClient = actionClient.use(async ({ next }) => {
@@ -563,6 +597,9 @@ For gating UI in Server Components, call `isSubscribed(session.user.id)` directl
 > next-safe-action **masks** thrown errors by default — without `handleServerError`, every `serverError` reads
 > "Something went wrong while executing the operation." Throw `new ActionError("...")` for messages the user
 > should see; anything else (DB errors, Stripe exceptions) stays masked and never leaks to the client.
+> The `console.error` is what keeps masked errors from vanishing entirely: the user sees a generic toast, and
+> the real stack trace lands in stdout, which Railway captures. This stack ships **no error tracker** — if you
+> want Sentry, this callback is where it hooks in (`Sentry.captureException(e)` on the same line).
 
 ## Step 22 — Error handling convention (next-safe-action + react-hook-form)
 
@@ -700,13 +737,36 @@ export const toggleTodoSchema = z.object({
 });
 ```
 
-**Upload flow (two steps):**
+**Upload flow (three steps):**
 
-1. Client calls a `getUploadUrl` action → receives presigned URL + S3 key (from `getPresignedUploadUrl()` in `lib/storage.ts`)
+1. Client calls a `getUploadUrl` action with the file's name and content type → the action **derives the key
+   itself** and returns it alongside the presigned URL (from `getPresignedUploadUrl()` in `lib/storage.ts`)
 2. Client uploads the file directly to S3 via `fetch(presignedUrl, { method: "PUT", body: file })`
-3. Client calls the `createTodo` action with the resulting S3 key as `attachmentKey`
+3. Client calls the `createTodo` action with the returned key as `attachmentKey`
 
-Downloads work the same way in reverse: an action returns a presigned download URL via `getPresignedDownloadUrl()`.
+**The client never dictates the key.** It proposes a filename; the action sanitizes it and namespaces it under
+the caller's user id:
+
+```ts
+// features/todos/actions.ts — inside getUploadUrl, an authActionClient action
+const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100);
+const key = `${ctx.user.id}/${createId()}/${safeName}`;
+```
+
+A presigned PUT authorizes writing **one exact key**, so a client that could choose the key could request a URL
+for `<someone-else's-id>/...` and overwrite their attachment. The `ctx.user.id` prefix makes that impossible by
+construction; `createId()` stops a user overwriting their own files by uploading the same filename twice.
+
+Two consequences to carry into real features:
+
+- **Ownership checks read the prefix.** `getDownloadUrl` and any delete must verify the key starts with
+  `${ctx.user.id}/` before signing — otherwise the same hole reopens on the read side.
+- **`deleteTodo` deletes the object.** Call `deleteFile(todo.attachmentKey)` after the row is gone, or the
+  bucket accumulates unreachable objects forever. An upload whose `createTodo` never lands is still orphaned;
+  if that matters at your volume, add a lifecycle rule to expire objects the DB doesn't reference.
+
+Downloads work the same way in reverse: an action verifies ownership, then returns a presigned download URL via
+`getPresignedDownloadUrl()`.
 
 ## Step 32 — getBaseUrl utility (`lib/utils.ts`)
 
@@ -722,10 +782,10 @@ export function getBaseUrl() {
 
 ## Step 33 — Email (`lib/email.ts`)
 
-Sends through **Amazon SES** (`@aws-sdk/client-sesv2`) using the shared AWS credentials.
+Sends through **Amazon SES** (`@aws-sdk/client-sesv2`) using the SES-only credentials.
 
-- A module-level `SESv2Client` configured with `env.AWS_REGION` and the `env.AWS_ACCESS_KEY_ID` /
-  `env.AWS_SECRET_ACCESS_KEY` pair.
+- A module-level `SESv2Client` configured with `region: env.SES_REGION` and an explicit `credentials` object
+  built from `env.SES_ACCESS_KEY_ID` / `env.SES_SECRET_ACCESS_KEY`.
 - One exported function — the contract the auth config depends on:
   `sendEmail({ to, subject, react }: { to: string; subject: string; react: ReactElement })`.
   It awaits `render(react)` (react-email v6's `render` is async) and sends a `SendEmailCommand` with
@@ -747,18 +807,25 @@ Preview templates with `pnpm email:dev` (react-email dev server) — no SES acco
 
 ## Step 34 — AWS S3 Object Storage (`lib/storage.ts`)
 
-Thin wrappers around `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` against a private S3 bucket.
+Thin wrappers around `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` against the private uploads bucket —
+by default the one provisioned in `infra/` (Step 41), but any S3-compatible bucket works.
 
-- A module-level `S3Client` — constructing one makes no network calls and the AWS credentials are always
-  present. Config: `region: env.AWS_REGION`, `endpoint: env.BUCKET_ENDPOINT` (undefined for real AWS — only set
-  for S3-compatible hosts), `forcePathStyle: env.BUCKET_FORCE_PATH_STYLE`, and the shared credentials.
+- A module-level `S3Client` — constructing one makes no network calls and the credentials are always present.
+  Config: `region: env.BUCKET_REGION`, an explicit `credentials` object built from `env.BUCKET_ACCESS_KEY_ID` /
+  `env.BUCKET_SECRET_ACCESS_KEY`, `endpoint: env.BUCKET_ENDPOINT` (undefined for AWS S3), and
+  `forcePathStyle: env.BUCKET_FORCE_PATH_STYLE`.
 - Exported functions, all passing `Bucket: env.BUCKET_NAME`: `uploadFile(key, body, contentType?)`,
   `downloadFile(key)`, `deleteFile(key)`, `listFiles(prefix?)`, and `getPresignedUploadUrl(key, contentType?,
 expiresIn = 3600)` / `getPresignedDownloadUrl(key, expiresIn = 3600)` via `getSignedUrl`.
-- No gating: `BUCKET_NAME` defaults to `"uploads"`, so storage is always available.
+- No gating: all four `BUCKET_*` vars are required, so storage is always available.
 
 Keep the bucket **private** (block public access) and serve files through presigned URLs or an authenticated
 backend route.
+
+> To swap AWS S3 for another provider (Railway buckets, Cloudflare R2, any S3 API implementation), set
+> `BUCKET_ENDPOINT` to its endpoint and `BUCKET_FORCE_PATH_STYLE=true` if it addresses buckets by path. Nothing
+> in `lib/storage.ts` changes, and the uploads bucket in `infra/` becomes unnecessary — the SES user and
+> backups bucket in Step 41 are still worth keeping.
 
 ## Step 35 — `app/api/health/route.ts`
 
@@ -815,8 +882,16 @@ A stub `GET` endpoint for scheduled jobs, empty by default — add project-speci
 }
 ```
 
+Also pin the package manager in the same file — `corepack enable && corepack use pnpm@latest` writes it:
+
+```json
+{ "packageManager": "pnpm@10.0.0" }
+```
+
 > `db:seed` is empty by default — add project-specific seed data per project.
 > `postlint` runs `tsc --noEmit` automatically after every lint run.
+> `packageManager` is the single source of truth for the pnpm version: CI reads it (Step 40) instead of pinning
+> a second copy in the workflow, and Corepack enforces it locally.
 > `stripe:dev`: forward Stripe events to the local app via the Stripe CLI (`stripe listen`). Requires `stripe login` once.
 > Railpack handles the production build and container startup — no Railway-specific build/start scripts needed.
 
@@ -831,6 +906,11 @@ Verifies the environment is wired correctly after cloning. Run with `pnpm test` 
 3. **Stripe** (optional) — if `env.STRIPE_SECRET_KEY` is set, just confirm its presence.
 
 Each passing check logs a `✓` line; the script ends with "All checks passed." and `process.exit(0)`.
+
+> **There is no test suite, and this is deliberate** — no Vitest, no Playwright, no test job in CI. `pnpm test`
+> runs this smoke script and nothing else: it answers "is this clone wired up correctly," not "is this code
+> correct." Do not add a test framework to the starter kit itself. Add one per project, when that project has
+> behavior worth pinning down.
 
 ## Step 39 — Format and Verify
 
@@ -853,10 +933,10 @@ One `lint` job on `push`, five steps:
    package.json, so it's pinned in exactly one place.
 3. `actions/setup-node@v6` with `node-version: 24` and `cache: pnpm` (pnpm must be set up first for the cache).
 4. `pnpm install --frozen-lockfile` — CI fails on lockfile drift instead of silently updating it.
-5. `pnpm format:check`, then `pnpm lint`.
+5. `pnpm lint`.
 
-> `pnpm lint` already covers ESLint + Prettier-as-a-lint-rule + `tsc --noEmit` (via `postlint`); `format:check`
-> additionally verifies the files ESLint doesn't lint (Markdown, CSS, JSON, YAML).
+> No separate `pnpm format:check` step: `pnpm lint` already covers ESLint + Prettier-as-a-lint-rule +
+> `tsc --noEmit` (via `postlint`).
 > No `.env` is needed: neither Prettier, ESLint, nor `tsc` executes app code, so t3-env validation never runs.
 > A production `next build` is deliberately not in CI — it executes `lib/env.ts`, which would demand real
 > env values. Railway's deploy build (with its service variables) covers that path.
@@ -882,11 +962,15 @@ Terraform in `infra/` provisions everything a project needs on AWS, using the la
   `attach_require_latest_tls_policy` + `attach_deny_insecure_transport_policy`, and a CORS rule allowing
   `GET`/`PUT` with `Content-Type` from `http://localhost:3000` (dev) or `https://www.<production_domain>`
   (production) — required for the browser's direct presigned PUT/GET.
-- **App user** (`<prefix>-app`, iam-user module, no login profile) with two policies via the iam-policy module
-  (policy documents authored as `data.aws_iam_policy_document`):
-  - `<prefix>-app-s3-access` — `s3:*` on the uploads bucket and its objects only.
-  - `<prefix>-app-ses-send` — `ses:SendEmail` + `ses:SendRawEmail` on `*`, conditioned to
-    `ses:FromAddress` matching `*@<production_domain>`.
+- **Storage user** (`<prefix>-storage`, iam-user module, no login profile) with one policy via the iam-policy
+  module (policy documents authored as `data.aws_iam_policy_document`):
+  - `<prefix>-storage-s3-access` — `s3:*` on the uploads bucket and its objects only.
+- **SES user** (`<prefix>-ses`, iam-user module, no login profile) with one policy:
+  - `<prefix>-ses-send` — `ses:SendEmail` + `ses:SendRawEmail` on `*`, conditioned to `ses:FromAddress`
+    matching `*@<production_domain>`.
+
+> Two users, not one with two policies: each key pair carries exactly one capability, so a leaked storage key
+> cannot send mail and a leaked mail key cannot touch the bucket.
 
 **Backup resources** (`backups.tf`, created only when `environment == "production"` via `count`):
 
@@ -896,16 +980,17 @@ Terraform in `infra/` provisions everything a project needs on AWS, using the la
 - **Backup user** (`<prefix>-database-backup`, no login profile) with a single policy allowing only
   `s3:PutObject` on the backups bucket's objects.
 
-**Outputs**: `aws_region`, app user `access_key_id` / `access_key_secret` (sensitive), `bucket_id`,
-`ses_from_email` (`no-reply@<production_domain>`), and the production-only `backups_bucket_id` /
-`backup_user_access_key_id` / `backup_user_access_key_secret` (null in dev).
+**Outputs**: `aws_region`, `bucket_id`, storage user `bucket_access_key_id` / `bucket_secret_access_key`
+(sensitive), SES user `ses_access_key_id` / `ses_secret_access_key` (sensitive), `ses_from_email`
+(`no-reply@<production_domain>`), and the production-only `backups_bucket_id` / `backup_user_access_key_id` /
+`backup_user_access_key_secret` (null in dev).
 
 Also add to `.gitignore`: `infra/.terraform/`, `*.tfstate*`, `.env.infra` — and **commit**
 `infra/.terraform.lock.hcl`.
 
 **`infra/README.md`** documents the apply flow and a quick script that writes the app outputs to
-`../.env.infra` (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `BUCKET_NAME`, `EMAIL_FROM`)
-for copying into `.env`.
+`../.env.infra` (`BUCKET_REGION`, `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY`, `BUCKET_NAME`,
+`SES_REGION`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`, `EMAIL_FROM`) for copying into `.env`.
 
 > `terraform init && terraform apply` for dev; `terraform workspace new production && terraform apply` for
 > production.
@@ -916,8 +1001,8 @@ for copying into `.env`.
 A minimal Railway cron container in `backup/`: dump the database, upload to S3, exit. Retention is the backups
 bucket's lifecycle rule (Step 41) — the container only ever uploads, never lists or deletes.
 
-- **`Dockerfile`** — `FROM postgres:18-alpine` (pg_dump must match the server's major version) plus
-  `apk add aws-cli`; copies in `backup.sh` as the entrypoint.
+- **`Dockerfile`** — `FROM postgres:18-alpine` (pg_dump must match the server's major version — the same tag as
+  `compose.yaml`, Step 10) plus `apk add aws-cli`; copies in `backup.sh` as the entrypoint.
 - **`backup.sh`** (`set -eu`; requires `DATABASE_URL` and `BACKUP_BUCKET`):
   `pg_dump --no-owner --no-privileges | gzip -9` to a temp file, **abort if the dump is under 100 bytes**
   (suspiciously small), then `aws s3 cp` to `s3://$BACKUP_BUCKET/db/YYYY/MM/DD/<ISO-timestamp>.sql.gz`.
@@ -926,8 +1011,11 @@ bucket's lifecycle rule (Step 41) — the container only ever uploads, never lis
 
 Deploy as a second Railway service with root directory `backup/`, connected to the same repo. Set its variables
 from the production Terraform outputs: `DATABASE_URL` (reference the Postgres service — private network),
-`BACKUP_BUCKET`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (the **backup** user, not the app user), and
-`AWS_REGION`.
+`BACKUP_BUCKET`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (the **backup** user — not the storage or SES
+user), and `AWS_REGION`.
+
+> The `AWS_*` names are correct **here only**: this container shells out to `aws-cli`, which reads them from its
+> default credential chain. The Next.js app never uses them (Step 9).
 
 ## Step 43 — Deployment on Railway
 
@@ -959,26 +1047,31 @@ BETTER_AUTH_URL=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 EMAIL_FROM=
-AWS_REGION=
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
+SES_REGION=
+SES_ACCESS_KEY_ID=
+SES_SECRET_ACCESS_KEY=
+BUCKET_REGION=
+BUCKET_ACCESS_KEY_ID=
+BUCKET_SECRET_ACCESS_KEY=
+BUCKET_NAME=
 ```
 
-**Optional app service variables (blank Stripe/cron vars disable the feature; `BUCKET_NAME` just overrides the `"uploads"` default):**
+**Optional app service variables (blank Stripe/cron vars disable the feature; the two `BUCKET_*` vars are only for non-AWS S3-compatible hosts):**
 
 ```
 CRON_SECRET=
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
 STRIPE_PRICE_ID=
-BUCKET_NAME=
 BUCKET_ENDPOINT=
+BUCKET_FORCE_PATH_STYLE=
 ```
 
-`DATABASE_URL` should reference the Railway Postgres service. The AWS key pair (SES + S3 bucket) comes
-from your AWS account — create one IAM user with `ses:SendEmail` plus scoped access to the project bucket. For
-local development, link the project with the Railway CLI and run commands through `railway run`, which injects
-the same service variables locally.
+`DATABASE_URL` should reference the Railway Postgres service. The two AWS key pairs come from the Terraform
+outputs in Step 41 — one IAM user for SES, one for the uploads bucket. If you'd rather use a Railway bucket
+than an S3 one, take its credentials from the Railway bucket service and set `BUCKET_ENDPOINT` (plus
+`BUCKET_FORCE_PATH_STYLE=true`) alongside them. For local development, link the project with the Railway CLI
+and run commands through `railway run`, which injects the same service variables locally.
 
 > Also compatible with **Dokploy** and any other platform that supports Railpack.
 
@@ -1074,12 +1167,14 @@ pnpm dlx skills add next-safe-action/skills
 
 8. **Stripe plugin** — guard with `env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET` so the plugin only mounts when configured. The plugin owns the `subscriptions` table, mounts its own webhook at `/api/auth/stripe/webhook`, and persists subscription state for you — do not write a manual webhook handler. `referenceId` (not `userId`) is the FK back to the user.
 
-9. **Object storage** — always available: the AWS credentials are required anyway (SES), and `BUCKET_NAME`
-   defaults to `"uploads"`. Create the bucket in your AWS account; set `BUCKET_NAME` only to override the name.
+9. **Object storage** — always available, never gated: all four `BUCKET_*` credentials are required and
+   `BUCKET_NAME` has no default. Point it at the bucket `infra/` provisions for the environment.
 
-10. **One AWS key pair** — `AWS_REGION` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` serve both SES (email)
-    and S3 (storage). Leave `BUCKET_ENDPOINT` unset for real AWS — it and `BUCKET_FORCE_PATH_STYLE=true` exist
-    only as escape hatches for S3-compatible hosts (e.g. MinIO).
+10. **Two AWS key pairs, never named `AWS_*`** — `SES_*` for email, `BUCKET_*` for storage, from two separate
+    IAM users (Step 41). The `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` names are reserved by the AWS SDK's
+    default credential chain: using them would let either client silently authenticate with the other's key.
+    `BUCKET_ENDPOINT` + `BUCKET_FORCE_PATH_STYLE=true` are the escape hatch for non-AWS S3-compatible hosts
+    (e.g. Railway buckets); leave both unset for AWS S3.
 
 11. **Tailwind v4** — config lives in `globals.css` via `@import "tailwindcss"`, not `tailwind.config.js`.
 
@@ -1123,3 +1218,13 @@ pnpm dlx skills add next-safe-action/skills
 30. **No barrel files in features** — import directly from the defining file (`@/features/<name>/data`, `@/features/<name>/components/<component>`). Server actions live in a single `actions.ts` per feature with `"use server"` at the top; queries in `data.ts`.
 
 31. **One subscription per user** — the Stripe plugin does _not_ prevent duplicates: `subscription.upgrade` without a `subscriptionId` creates a second subscription alongside the existing one (duplicate billing). Never call `upgrade` for an already-subscribed user — the UI must only offer Upgrade when not subscribed (billing portal otherwise). `getSubscription` prefers the active/trialing row if duplicates ever appear.
+
+32. **Presigned upload keys are server-derived** — `getUploadUrl` builds `${ctx.user.id}/${createId()}/${safeName}` and ignores any client-supplied key. A presigned PUT authorizes one exact key, so letting the client name it lets any signed-in user overwrite another user's object. Reads must check the `${user.id}/` prefix too, and `deleteTodo` must call `deleteFile` or the bucket fills with orphans.
+
+33. **No test suite, on purpose** — `pnpm test` is a smoke script (Step 38), not a test runner. Do not add Vitest or Playwright to the starter kit; add them per project.
+
+34. **No error tracker** — masked `serverError`s are `console.error`'d in `handleServerError` (Step 21) so they reach Railway's logs. That callback is the single hook point if you later add Sentry.
+
+35. **Postgres major version is pinned in three places** — `compose.yaml` (Step 10), the backup container's base image (Step 42), and the Railway Postgres service. They must agree: `pg_dump` refuses to dump a server newer than itself. Never use `postgres:latest`.
+
+36. **Rate limiting is on and DB-backed** — `rateLimit: { enabled: true, storage: "database" }` in `lib/auth.ts`. better-auth's default is memory storage and production-only, which means no protection in dev and per-instance limits in production. Keep the built-in per-path defaults; don't hand-tune `customRules`. The `rateLimits` table comes from `pnpm auth:generate`.
