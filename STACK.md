@@ -43,7 +43,7 @@ pnpm dlx create-next-app@latest . --typescript --tailwind --eslint --app --no-sr
 pnpm add \
   drizzle-orm postgres zod \
   next-safe-action react-hook-form @hookform/resolvers \
-  better-auth @better-auth/stripe stripe \
+  better-auth @better-auth/drizzle-adapter @better-auth/stripe stripe \
   @t3-oss/env-nextjs \
   @paralleldrive/cuid2 \
   next-themes \
@@ -85,25 +85,14 @@ Three files, written together. `tsconfig.json`:
 
 ```json
 {
-  "extends": [
-    "@tsconfig/strictest/tsconfig.json",
-    "@tsconfig/next/tsconfig.json"
-  ],
+  "extends": ["@tsconfig/strictest", "@tsconfig/next"],
   "compilerOptions": {
     "target": "esnext",
-    "jsx": "react-jsx",
     "noPropertyAccessFromIndexSignature": false,
     "exactOptionalPropertyTypes": false,
     "paths": { "@/*": ["./*"] }
   },
-  "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts",
-    "**/*.mts"
-  ],
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", ".next/dev/types/**/*.ts", "**/*.mts"],
   "exclude": ["node_modules", ".next"]
 }
 ```
@@ -165,7 +154,7 @@ BUCKET_REGION="us-east-1"
 BUCKET_ACCESS_KEY_ID=""
 BUCKET_SECRET_ACCESS_KEY=""
 BUCKET_NAME=""
-# Leave both blank for AWS S3. Set them to point at any S3-compatible host (e.g. Railway buckets).
+# Leave both blank for AWS S3. Set them to point at another S3-compatible host.
 BUCKET_ENDPOINT=""
 BUCKET_FORCE_PATH_STYLE="" # "true" for hosts that address buckets by path instead of subdomain
 
@@ -201,7 +190,7 @@ SES_REGION: z.string(),
 SES_ACCESS_KEY_ID: z.string(),
 SES_SECRET_ACCESS_KEY: z.string(),
 
-// Object storage — S3 or any S3-compatible bucket
+// Object storage — S3 or another S3-compatible bucket
 BUCKET_REGION: z.string(),
 BUCKET_ACCESS_KEY_ID: z.string(),
 BUCKET_SECRET_ACCESS_KEY: z.string(),
@@ -227,14 +216,29 @@ Set `emptyStringAsUndefined` on the `createEnv` call:
 
 ```ts
 export const env = createEnv({
-  server: {/* schema above */},
+  server: {
+    /* schema above */
+  },
   client: {},
   runtimeEnv: {
     /* list every var explicitly: DATABASE_URL: process.env.DATABASE_URL, ... */
   },
   emptyStringAsUndefined: true,
 });
+
+if (typeof window === "undefined") {
+  const stripeVariableCount = [env.STRIPE_SECRET_KEY, env.STRIPE_WEBHOOK_SECRET, env.STRIPE_PRICE_ID].filter(
+    Boolean,
+  ).length;
+
+  if (stripeVariableCount !== 0 && stripeVariableCount !== 3) {
+    throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID must be set together");
+  }
+}
 ```
+
+> Stripe is an all-or-nothing optional feature. The direct startup check rejects partial configuration; never
+> substitute empty strings for a missing Stripe secret, webhook secret, or Price ID.
 
 ## Step 8 — compose.yaml (local development)
 
@@ -281,8 +285,10 @@ features/          ← one folder per product feature
     actions.ts     ← server actions ("use server" at the top, all actions in one file)
     data.ts        ← Drizzle queries
     schemas.ts     ← shared Zod schemas (used by both actions and forms)
-  subscriptions/   ← subscription gating (always present when Stripe is enabled)
-    data.ts        ← getSubscription + isSubscribed queries
+  subscriptions/   ← billing UI (always present when Stripe is enabled)
+    components/    ← checkout and billing-portal controls
+domain/            ← shared business rules and queries with no UI/framework dependency
+  subscriptions.ts ← getSubscription + isSubscribed queries
 components/ui/     ← shadcn components
 hooks/             ← shared React hooks (use-mobile from shadcn)
 db/                ← Drizzle schema, client, seed
@@ -306,8 +312,12 @@ app/               ← Next.js App Router (routing only — no business logic)
 
 **Rules:**
 
-- `features/` may import from `lib/`, `db/`, `components/ui/` — but never from other features.
-- `app/` route segments import from `features/` and `lib/auth` for session checks.
+- `domain/` may import from `db/` and other domain modules, but never from `app/`, `features/`, `components/`, or
+  `lib/`. It owns business rules shared by framework infrastructure and product features.
+- `lib/` may import from `domain/` and `db/`; this keeps infrastructure such as action middleware from depending on
+  a feature slice.
+- `features/` may import from `domain/`, `lib/`, `db/`, and `components/ui/` — but never from other features.
+- `app/` route segments import from `features/`, `domain/`, and `lib/auth` for session checks.
 - Adding a feature: create `features/<name>/` with only the pieces it needs.
 - **No barrel files** — import directly from the defining file (`@/features/todos/data`,
   `@/features/todos/components/todo-form`).
@@ -373,9 +383,7 @@ import { env } from "@/lib/env";
 
 const globalForDb = globalThis as unknown as { db: ReturnType<typeof drizzle> };
 
-export const db =
-  globalForDb.db ??
-  drizzle(postgres(env.DATABASE_URL), { schema, casing: "snake_case" });
+export const db = globalForDb.db ?? drizzle(postgres(env.DATABASE_URL), { schema, casing: "snake_case" });
 
 if (process.env.NODE_ENV !== "production") globalForDb.db = db;
 ```
@@ -397,13 +405,22 @@ should not be added.
 
 ```ts
 import { init } from "@paralleldrive/cuid2";
+import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { stripe } from "@better-auth/stripe";
 import { magicLink } from "better-auth/plugins";
 import Stripe from "stripe";
 
-const stripeClient =
-  env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET
-    ? new Stripe(env.STRIPE_SECRET_KEY)
+const stripePlugin =
+  env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_PRICE_ID
+    ? stripe({
+        stripeClient: new Stripe(env.STRIPE_SECRET_KEY),
+        stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
+        createCustomerOnSignUp: true,
+        subscription: {
+          enabled: true,
+          plans: [{ name: "pro", priceId: env.STRIPE_PRICE_ID }],
+        },
+      })
     : null;
 
 export const auth = betterAuth({
@@ -425,26 +442,18 @@ export const auth = betterAuth({
   },
   plugins: [
     magicLink({
+      storeToken: "hashed",
       sendMagicLink: async ({ email, url }) => {
         /* send email */
       },
     }),
-    ...(stripeClient
-      ? [
-          stripe({
-            stripeClient,
-            stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET ?? "",
-            createCustomerOnSignUp: true,
-            subscription: {
-              enabled: true,
-              plans: [{ name: "pro", priceId: env.STRIPE_PRICE_ID ?? "" }],
-            },
-          }),
-        ]
-      : []),
+    ...(stripePlugin ? [stripePlugin] : []),
   ],
 });
 ```
+
+> Leave `expiresIn` unset to use Better Auth's default magic-link lifetime. Store the verification token hashed,
+> and keep the email copy duration-neutral so it cannot drift from the library default.
 
 > **Rate limiting must stay enabled**, with `storage: "database"` (better-auth's default is memory, production
 > only). Counters live in a `rateLimits` table — run `pnpm auth:generate`, then `db:generate` + `db:migrate`.
@@ -478,19 +487,12 @@ Always includes the Stripe plugin (costs nothing when Stripe is unconfigured). `
 
 ```ts
 import { createAuthClient } from "better-auth/react";
-import {
-  magicLinkClient,
-  inferAdditionalFields,
-} from "better-auth/client/plugins";
+import { magicLinkClient, inferAdditionalFields } from "better-auth/client/plugins";
 import { stripeClient } from "@better-auth/stripe/client";
 import type { auth } from "./auth";
 
 export const authClient = createAuthClient({
-  plugins: [
-    magicLinkClient(),
-    stripeClient({ subscription: true }),
-    inferAdditionalFields<typeof auth>(),
-  ],
+  plugins: [magicLinkClient(), stripeClient({ subscription: true }), inferAdditionalFields<typeof auth>()],
 });
 ```
 
@@ -504,8 +506,8 @@ export const authClient = createAuthClient({
 4. Get `STRIPE_WEBHOOK_SECRET` from the webhook endpoint — `pnpm stripe:dev` prints it locally, or create an
    endpoint in the dashboard pointing at `<BETTER_AUTH_URL>/api/auth/stripe/webhook`.
 
-An **Upgrade to Pro** button then appears in the dashboard automatically when signed in and `STRIPE_PRICE_ID` is
-set. Checkout is wired in `components/checkout-button.tsx`:
+An **Upgrade to Pro** button then appears in the dashboard automatically when signed in and all three Stripe
+variables are configured. Checkout is wired in `features/subscriptions/components/checkout-button.tsx`:
 
 ```ts
 await authClient.subscription.upgrade({
@@ -515,7 +517,8 @@ await authClient.subscription.upgrade({
 });
 ```
 
-Manage / cancel is wired in `components/manage-subscription-button.tsx` via the billing portal:
+Manage / cancel is wired in `features/subscriptions/components/manage-subscription-button.tsx` via the billing
+portal:
 
 ```ts
 await authClient.subscription.billingPortal({
@@ -532,7 +535,7 @@ await authClient.subscription.billingPortal({
 
 The template assumes a freemium model: users access the app for free and optionally upgrade to Pro.
 
-**`features/subscriptions/data.ts`** — query subscription status:
+**`domain/subscriptions.ts`** — query subscription status:
 
 ```ts
 // The Stripe plugin keeps `subscriptions` in sync; `referenceId` (not userId) holds the user id.
@@ -542,27 +545,20 @@ export async function getSubscription(userId: string) {
   const rows = await db.query.subscriptions.findMany({
     where: eq(subscriptions.referenceId, userId),
   });
-  return (
-    rows.find((row) => row.status === "active" || row.status === "trialing") ??
-    rows[0]
-  );
+  return rows.find((row) => row.status === "active" || row.status === "trialing") ?? rows[0];
 }
 
 export async function isSubscribed(userId: string) {
   const subscription = await getSubscription(userId);
-  return (
-    subscription?.status === "active" || subscription?.status === "trialing"
-  );
+  return subscription?.status === "active" || subscription?.status === "trialing";
 }
 ```
 
 **`lib/safe-action.ts`** — action clients with an `ActionError` class for user-facing error messages:
 
 ```ts
-import {
-  createSafeActionClient,
-  DEFAULT_SERVER_ERROR_MESSAGE,
-} from "next-safe-action";
+import { getSubscription } from "@/domain/subscriptions";
+import { createSafeActionClient, DEFAULT_SERVER_ERROR_MESSAGE } from "next-safe-action";
 
 export class ActionError extends Error {}
 
@@ -582,10 +578,7 @@ export const authActionClient = actionClient.use(async ({ next }) => {
 
 export const proActionClient = authActionClient.use(async ({ next, ctx }) => {
   const subscription = await getSubscription(ctx.user.id);
-  if (
-    subscription?.status !== "active" &&
-    subscription?.status !== "trialing"
-  ) {
+  if (subscription?.status !== "active" && subscription?.status !== "trialing") {
     throw new ActionError("Pro subscription required");
   }
   return next({ ctx: { ...ctx, subscription } });
@@ -699,11 +692,10 @@ Both the dashboard card and the settings Billing section render the same control
 plus an "Upgrade to Pro" checkout button (`authClient.subscription.upgrade`) when not subscribed, or a "Manage
 subscription" billing-portal link (`authClient.subscription.billingPortal()`) when subscribed.
 
-## Step 26 — Todos feature (demo scaffolding)
+## Step 26 — Todos feature (initial example)
 
-**Delete `features/todos/` and `app/dashboard/todos/` once you've internalized the FSD pattern. Do not ship it.**
-
-A todos CRUD that exercises every convention in the stack. Implement it as a full FSD slice; the exact component
+A todos CRUD that scaffolds the first feature and exercises every convention in the stack. Implement it as a full
+FSD slice; the exact component
 breakdown is up to you as long as it demonstrates:
 
 - **List** — Server Component fetching via `data.ts` queries, scoped to the current user
@@ -718,9 +710,18 @@ breakdown is up to you as long as it demonstrates:
 ```ts
 import { z } from "zod";
 
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export const attachmentContentTypes = ["image/jpeg", "image/png", "application/pdf"] as const;
+
 export const createTodoSchema = z.object({
   text: z.string().min(1).max(500),
   attachmentKey: z.string().optional(),
+});
+
+export const getUploadUrlSchema = z.object({
+  filename: z.string().min(1).max(255),
+  contentType: z.enum(attachmentContentTypes),
+  size: z.number().int().positive().max(MAX_ATTACHMENT_BYTES),
 });
 
 export const toggleTodoSchema = z.object({
@@ -728,12 +729,16 @@ export const toggleTodoSchema = z.object({
 });
 ```
 
-**Upload flow (three steps):**
+**Upload flow (four steps):**
 
-1. Client calls a `getUploadUrl` action with the file's name and content type → the action **derives the key
-   itself** and returns it alongside the presigned URL (from `getPresignedUploadUrl()` in `lib/storage.ts`).
-2. Client uploads directly to S3 via `fetch(presignedUrl, { method: "PUT", body: file })`.
+1. Client calls a `getUploadUrl` action with the file's name, content type, and byte size. The action validates all
+   three, **derives the key itself**, and returns it with a presigned `PutObject` URL and the headers to send.
+2. Client uploads the `File` directly with `fetch(url, { method: "PUT", headers, body: file })`. It must send the
+   exact signed `Content-Type` and `Content-Disposition`; the browser supplies `Content-Length` from the `File`.
 3. Client calls `createTodo` with the returned key as `attachmentKey`.
+4. Before persisting the key, `createTodo` verifies the ownership prefix and calls `HeadObject`. It accepts the
+   object only when its stored `ContentLength` is within the limit and its `ContentType` is allowed; otherwise it
+   deletes the invalid object and rejects the action.
 
 **The client never dictates the key.** It proposes a filename; the action sanitizes it and namespaces it under the
 caller's user id:
@@ -742,19 +747,48 @@ caller's user id:
 // features/todos/actions.ts — inside getUploadUrl, an authActionClient action
 const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100);
 const key = `${ctx.user.id}/${createId()}/${safeName}`;
+const contentDisposition = `attachment; filename="${safeName}"`;
+
+const url = await getPresignedUploadUrl({
+  key,
+  contentType,
+  contentLength: size,
+  contentDisposition,
+});
+
+return {
+  key,
+  url,
+  headers: {
+    "Content-Type": contentType,
+    "Content-Disposition": contentDisposition,
+  },
+};
 ```
 
 A presigned PUT authorizes writing **one exact key**, so a client that could choose the key could request a URL for
 `<someone-else's-id>/...` and overwrite their attachment. The `ctx.user.id` prefix makes that impossible by
 construction; `createId()` stops a user overwriting their own files by uploading the same filename twice.
 
+Create the `PutObjectCommand` with `Key`, `ContentType`, `ContentLength`, and `ContentDisposition`. Pass
+`signableHeaders: new Set(["content-type", "content-length", "content-disposition"])` to `getSignedUrl` so the
+request must match those values. The client cannot set `Content-Length` manually in browser `fetch`; its `File`
+body causes the browser to supply the actual length. Keep the server-side `HeadObject` finalization check even when
+these headers are signed: it is the portable enforcement point across S3-compatible providers and prevents an
+invalid object from becoming application data. A PUT URL has no range condition, so an invalid upload may reach
+object storage before the finalizer deletes it.
+
 Two consequences to carry into real features:
 
 - **Ownership checks read the prefix.** `getDownloadUrl` and any delete must verify the key starts with
-  `${ctx.user.id}/` before signing — otherwise the same hole reopens on the read side.
+  `${ctx.user.id}/` before signing. `createTodo` performs the same check and validates `HeadObject` metadata before
+  accepting `attachmentKey`; otherwise the same hole reopens when the key is persisted.
 - **`deleteTodo` deletes the object.** Call `deleteFile(todo.attachmentKey)` after the row is gone, or the bucket
-  accumulates unreachable objects forever. An upload whose `createTodo` never lands is still orphaned; if that
-  matters at your volume, add a lifecycle rule to expire objects the DB doesn't reference.
+  accumulates unreachable objects forever. Bulk-delete paths must collect and delete their attachments too.
+- **Uploads can be abandoned before `createTodo`.** For production features where orphan volume matters, stage new
+  objects under a `pending/` prefix or tag, promote/retag them after the DB write, and configure a bucket lifecycle
+  rule that expires only stale pending objects. S3 lifecycle rules cannot infer whether an arbitrary object is
+  referenced by the database.
 
 Downloads work the same way in reverse: an action verifies ownership, then returns a presigned download URL via
 `getPresignedDownloadUrl()`.
@@ -784,8 +818,9 @@ nodemailer path in this stack.
   `FromEmailAddress: env.EMAIL_FROM`.
 
 **`emails/magic-link.tsx`** — a `MagicLinkEmail({ url })` component: preview + heading "Sign in to {APP_NAME}", a
-sentence noting the link expires in 10 minutes, a sign-in `<Button href={url}>`, the raw URL as copyable text, and
-an "if you didn't request this, ignore it" line. Built entirely from react-email components.
+sentence noting the link expires shortly, a sign-in `<Button href={url}>`, the raw URL as copyable text, and an
+"if you didn't request this, ignore it" line. Built entirely from react-email components. Do not hardcode a
+duration in the copy; the plugin intentionally uses Better Auth's default `expiresIn`.
 
 Preview templates with `pnpm email:dev` — no SES account needed for template work.
 
@@ -797,8 +832,12 @@ folder is a user who cannot sign in. Terraform provisions none of this — do it
 
 1. **Verify the domain** in the SES console (not just the single `EMAIL_FROM` address).
 2. **Enable Easy DKIM** and publish the three `CNAME` records SES gives you. Wait for _Verified_.
-3. **Publish an SPF record** — a `TXT` on the domain including `include:amazonses.com`. If you already have one,
-   add the include to it; two SPF records is a hard fail, not a merge.
+3. **Choose the MAIL FROM setup deliberately.** SES's default `amazonses.com` MAIL FROM domain already passes SPF;
+   do not add `include:amazonses.com` to the visible From domain just because SES sends the message. If you want SPF
+   alignment with your domain, configure a **custom MAIL FROM subdomain** in SES (for example,
+   `mail.<production_domain>`) and publish the exact MX and SPF records SES provides on that subdomain. If that
+   subdomain already has an SPF record, merge the SES include into it; two SPF records on the same name is a hard
+   fail, not a merge.
 4. **Publish a DMARC record** — `TXT` at `_dmarc.<domain>`, starting at `v=DMARC1; p=none; rua=mailto:...`. Observe
    before you enforce, then tighten to `quarantine` once reports look clean.
 5. **Request production access** to leave the sandbox — new SES accounts start in sandbox mode, where recipients
@@ -808,26 +847,32 @@ folder is a user who cannot sign in. Terraform provisions none of this — do it
 
 ## Step 29 — AWS S3 Object Storage (`lib/storage.ts`)
 
-Thin wrappers around `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` against the private uploads bucket — by
-default the one provisioned in `infra/` (Step 36), but any S3-compatible bucket works.
+Thin wrappers around `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner` against the private uploads bucket —
+by default the AWS S3 bucket provisioned in `infra/` (Step 36), but any compatible S3 API can be configured.
 
 - A module-level `S3Client` — constructing one makes no network calls and the credentials are always present.
   Config: `region: env.BUCKET_REGION`, an explicit `credentials` object from `env.BUCKET_ACCESS_KEY_ID` /
   `env.BUCKET_SECRET_ACCESS_KEY`, `endpoint: env.BUCKET_ENDPOINT` (undefined for AWS S3), and
   `forcePathStyle: env.BUCKET_FORCE_PATH_STYLE`.
 - Exported functions, all passing `Bucket: env.BUCKET_NAME`: `uploadFile(key, body, contentType?)`,
-  `downloadFile(key)`, `deleteFile(key)`, `listFiles(prefix?)`, `getPresignedUploadUrl(key, contentType?, expiresIn = 3600)`,
-  and `getPresignedDownloadUrl(key, expiresIn = 3600)`.
+  `downloadFile(key)`, `headFile(key)`, `deleteFile(key)`, `listFiles(prefix?)`,
+  `getPresignedUploadUrl({ key, contentType, contentLength, contentDisposition, expiresIn = 300 })`, and
+  `getPresignedDownloadUrl(key, expiresIn = 3600)`.
+- `getPresignedUploadUrl` creates a `PutObjectCommand` with the exact key, MIME type, byte length, and content
+  disposition, then calls `getSignedUrl` with all three headers in `signableHeaders`. Return only the URL; the
+  action returns the exact upload headers alongside it.
+- `headFile` sends `HeadObjectCommand` and returns `ContentLength`, `ContentType`, and `ContentDisposition` for the
+  finalization check. Treat a missing value or mismatch as invalid and delete the object.
 - **Never gated:** all four `BUCKET_*` vars are required and `BUCKET_NAME` has no default, so storage is always
   available.
 
 Keep the bucket **private** (block public access) and serve files through presigned URLs or an authenticated
 backend route.
 
-> To swap AWS S3 for another provider (Railway buckets, Cloudflare R2, any S3 API implementation), set
-> `BUCKET_ENDPOINT` and `BUCKET_FORCE_PATH_STYLE=true` if it addresses buckets by path. Nothing in
-> `lib/storage.ts` changes; the uploads bucket in `infra/` becomes unnecessary, but keep the SES user and backups
-> bucket (Step 36).
+> To swap AWS S3 for another provider, set `BUCKET_ENDPOINT` and `BUCKET_FORCE_PATH_STYLE=true` if it addresses
+> buckets by path. Confirm that the provider preserves signed PUT headers and supports `HeadObject`; the finalization
+> check remains mandatory. When the uploads bucket moves away from AWS, the uploads resources in `infra/` become
+> unnecessary, but keep the SES user and backups bucket (Step 36).
 
 ## Step 30 — `app/api/health/route.ts`
 
@@ -923,19 +968,42 @@ pnpm lint
 
 ## Step 35 — GitHub Actions CI (`.github/workflows/ci.yml`)
 
-One `lint` job on `push`, five steps:
+One `checks` job on both `push` and `pull_request`, with `permissions: { contents: read }`, six steps:
 
 1. `actions/checkout@v7`
 2. `pnpm/action-setup@v6` with **no `version` input** — it reads the pnpm version from `packageManager`.
 3. `actions/setup-node@v6` with `node-version: 24` and `cache: pnpm` (pnpm must be set up first for the cache).
 4. `pnpm install --frozen-lockfile` — CI fails on lockfile drift instead of silently updating it.
 5. `pnpm lint`.
+6. `pnpm build`.
 
 > No separate `pnpm format:check` step: `pnpm lint` already covers ESLint + Prettier-as-a-lint-rule + `tsc --noEmit`.
 > **`node-version: 24` pins CI only, and is not authoritative.** There is deliberately no `engines` field and no
 > `.nvmrc`; add `engines` per project if the drift ever bites.
-> No `.env` is needed — none of these tools execute app code. A production `next build` is deliberately not in CI;
-> Railway's deploy build covers that path.
+> `next build` validates the production compilation path before merge, so the job needs non-secret, syntactically
+> valid placeholder environment variables. Define job-level values for every required variable: a local-format
+> `DATABASE_URL`, a 32+ character `BETTER_AUTH_SECRET`, `http://localhost:3000` for `BETTER_AUTH_URL`, placeholder
+> Google/AWS credentials, `ci@example.com` for `EMAIL_FROM`, `us-east-1` for both regions, and `ci` for
+> `BUCKET_NAME`. Leave Stripe and cron variables unset. The build must not contact Postgres, SES, or S3; these values
+> exist only because `lib/env.ts` validates configuration while modules are compiled.
+> Keep `actions/checkout@v7`; it is the current action generation used by this guide.
+
+```yaml
+env:
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/app
+  BETTER_AUTH_SECRET: "00000000000000000000000000000000"
+  BETTER_AUTH_URL: http://localhost:3000
+  GOOGLE_CLIENT_ID: ci
+  GOOGLE_CLIENT_SECRET: ci
+  EMAIL_FROM: ci@example.com
+  SES_REGION: us-east-1
+  SES_ACCESS_KEY_ID: ci
+  SES_SECRET_ACCESS_KEY: ci
+  BUCKET_REGION: us-east-1
+  BUCKET_ACCESS_KEY_ID: ci
+  BUCKET_SECRET_ACCESS_KEY: ci
+  BUCKET_NAME: ci
+```
 
 ## Step 36 — AWS Infrastructure (`infra/`, Terraform)
 
@@ -950,21 +1018,26 @@ production (prefixed `<project>`).
   **intentionally org-specific**: an existing bucket in this AWS account, created once and shared by every project.
   Forking this kit into another org means pointing the backend at your own state bucket.
 - Single AWS provider in `us-east-1` with `default_tags` of `Project` + `Environment`.
-- Variables: `project_name` and `production_domain` (validated non-empty; scopes SES sending and S3 CORS).
+- Variables: `project_name`, `production_domain`, and `production_app_origins`. `production_domain` is the bare
+  email domain used to scope SES sending. `production_app_origins` is a non-empty list of complete HTTPS origins
+  with no trailing slash (for example, `https://app.example.com` or a Railway-generated origin) used only for S3
+  CORS. Validate every value and keep both concerns separate; never derive the app origin by prepending `www`.
   `terraform.tfvars` holds per-project values — edit after cloning.
 - Locals: `environment` from `terraform.workspace`, `prefix` as described above.
 
 **Application resources** (`app.tf`):
 
 - **Uploads bucket** (`<prefix>-uploads`, s3-bucket module): private, with `attach_require_latest_tls_policy` +
-  `attach_deny_insecure_transport_policy`, and a CORS rule allowing `GET`/`PUT` with `Content-Type` from
-  `http://localhost:3000` (dev) or `https://www.<production_domain>` (production) — required for the browser's
-  direct presigned PUT/GET.
+  `attach_deny_insecure_transport_policy`, and a CORS rule allowing `GET`/`PUT` with `Content-Type` and
+  `Content-Disposition` from `http://localhost:3000` (dev) or every value in `production_app_origins` (production)
+  — required for the browser's direct presigned PUT/download flow.
 - **Storage user** (`<prefix>-storage`, iam-user module, no login profile) with one policy via the iam-policy
-  module (documents authored as `data.aws_iam_policy_document`): `<prefix>-storage-s3-access` — `s3:*` on the
-  uploads bucket and its objects only.
-- **SES user** (`<prefix>-ses`, no login profile) with one policy: `<prefix>-ses-send` — `ses:SendEmail` +
-  `ses:SendRawEmail` on `*`, conditioned to `ses:FromAddress` matching `*@<production_domain>`.
+  module (documents authored as `data.aws_iam_policy_document`): `<prefix>-storage-s3-access` with two statements:
+  `s3:ListBucket` + `s3:GetBucketLocation` on the bucket ARN, and `s3:GetObject` + `s3:PutObject` +
+  `s3:DeleteObject` on the bucket's object ARN (`/*`). Do not grant `s3:*` or bucket-administration actions.
+- **SES user** (`<prefix>-ses`, no login profile) with one policy: `<prefix>-ses-send` — `ses:SendEmail` on `*`,
+  conditioned to `ses:FromAddress` matching `*@<production_domain>`. The app does not send raw email, so it does
+  not need `ses:SendRawEmail`.
 
 **Backup resources** (`backups.tf`, created only when `environment == "production"` via `count`):
 
@@ -981,8 +1054,9 @@ production (prefixed `<project>`).
 
 Add to `.gitignore`: `infra/.terraform/`, `*.tfstate*`, `.env.infra` — and **commit** `infra/.terraform.lock.hcl`.
 
-**`infra/README.md`** documents the apply flow and a quick script that writes the app outputs to `../.env.infra`
-for copying into `.env`.
+**`infra/README.md`** documents the apply flow, explains that each production app origin must be listed exactly in
+`production_app_origins`, and includes a quick script that writes the app outputs to `../.env.infra` for copying
+into `.env`.
 
 > `terraform init && terraform apply` for dev; `terraform workspace new production && terraform apply` for
 > production. SES **verification** is not provisioned — verify the domain in the SES console (Step 28).
@@ -994,9 +1068,11 @@ lifecycle rule (Step 36) — the container only ever uploads, never lists or del
 
 - **`Dockerfile`** — `FROM postgres:18-alpine` (pg_dump must match the server's major version — the same tag as
   `compose.yaml`, Step 8) plus `apk add aws-cli`; copies in `backup.sh` as the entrypoint.
-- **`backup.sh`** (`set -eu`; requires `DATABASE_URL` and `BACKUP_BUCKET`): `pg_dump --no-owner --no-privileges | gzip -9`
-  to a temp file, **abort if the dump is under 100 bytes** (suspiciously small), then `aws s3 cp` to
-  `s3://$BACKUP_BUCKET/db/YYYY/MM/DD/<ISO-timestamp>.sql.gz`.
+- **`backup.sh`** (`#!/bin/ash` + `set -euo pipefail`; requires `DATABASE_URL` and `BACKUP_BUCKET`): create a temp
+  file with `mktemp`, register an `EXIT` trap to remove it, then run
+  `pg_dump --format=custom --no-owner --no-privileges --file="$dump_file" "$DATABASE_URL"`. Validate the archive
+  with `pg_restore --list "$dump_file" >/dev/null`, then `aws s3 cp` it to
+  `s3://$BACKUP_BUCKET/db/YYYY/MM/DD/<ISO-timestamp>.dump`.
 - **`railway.json`** — `DOCKERFILE` builder with `watchPatterns: ["backup/**"]`, `cronSchedule: "0 6 * * *"`
   (daily 06:00 UTC), `restartPolicyType: "NEVER"`.
 
@@ -1007,6 +1083,11 @@ user), and `AWS_REGION`.
 
 > The `AWS_*` names are correct **here only** — this container shells out to `aws-cli`. The app never uses them
 > (Step 7).
+> Custom format (`-Fc`) is compressed by `pg_dump` by default and supports selective restores through `pg_restore`;
+> do not pipe it through `gzip` again. `set -o pipefail` remains enabled so any future pipeline fails when any stage
+> fails. The archive validation replaces the arbitrary 100-byte heuristic.
+> A backup is not proven until it restores. Run a scheduled restore drill into a disposable PostgreSQL database and
+> execute at least `SELECT 1` plus project-specific row-count/invariant checks before destroying the test database.
 
 ## Step 38 — Deployment on Railway
 
@@ -1024,20 +1105,24 @@ Railpack auto-detects Next.js and handles the production build and startup. `rai
 
 1. Create a Railway project and deploy this repository from GitHub or with `railway up`.
 2. Add a PostgreSQL service and reference its `DATABASE_URL` from the app service.
-3. Generate a public app domain, then set `BETTER_AUTH_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}`.
-4. Configure Google OAuth with `<BETTER_AUTH_URL>/api/auth/callback/google`.
+3. Generate a public app domain (Railway-generated or custom), then set `BETTER_AUTH_URL` to that exact origin.
+4. Put the same origin in Terraform's `production_app_origins` list and apply the production workspace so S3 CORS
+   accepts browser uploads. Add every additional production origin explicitly; no `www` hostname is assumed.
+5. Configure Google OAuth with `<BETTER_AUTH_URL>/api/auth/callback/google`.
 
 **Required app service variables:** `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `EMAIL_FROM`, `SES_REGION`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`, `BUCKET_REGION`,
 `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY`, `BUCKET_NAME`.
 
-**Optional:** `CRON_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` (blank disables the
-feature), plus `BUCKET_ENDPOINT` / `BUCKET_FORCE_PATH_STYLE` for non-AWS S3-compatible hosts.
+**Optional:** `CRON_SECRET`; the Stripe trio `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_PRICE_ID`
+(leave all three blank to disable billing, or set all three); plus `BUCKET_ENDPOINT` / `BUCKET_FORCE_PATH_STYLE` for
+non-AWS S3-compatible hosts.
 
-The two AWS key pairs come from the Terraform outputs in Step 36. If you'd rather use a Railway bucket than an S3
-one, take its credentials from the Railway bucket service and set `BUCKET_ENDPOINT` (plus
-`BUCKET_FORCE_PATH_STYLE=true`) alongside them. For local development, link the project with the Railway CLI and
-run commands through `railway run`, which injects the same service variables locally.
+The two AWS key pairs come from the Terraform outputs in Step 36. If you'd rather use a Railway bucket than AWS S3,
+confirm that its current S3 API supports signed PUT headers and `HeadObject`, then take its credentials from the
+bucket service and set `BUCKET_ENDPOINT` (plus `BUCKET_FORCE_PATH_STYLE=true`) alongside them. For local
+development, link the project with the Railway CLI and run commands through `railway run`, which injects the same
+service variables locally.
 
 > Migrations run as Railway's **pre-deploy command**, never `postbuild`.
 > Also compatible with **Dokploy** and any other platform that supports Railpack.
@@ -1137,5 +1222,4 @@ Traps that aren't obvious from the step they belong to. Everything else is docum
 7. **`useOptimisticAction` is for pure mutations.** Use it for toggle (instant feedback), and plain `useAction` for
    create — anything with async side effects like a file upload must not be optimistic.
 
-8. **The todos feature is demo scaffolding.** Delete `features/todos/` and `app/dashboard/todos/` once you've
-   internalized the FSD pattern. Do not ship it.
+8. **The todos feature is the initial FSD example.** Adapt or replace it when the first product feature is defined.
