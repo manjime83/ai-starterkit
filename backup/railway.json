@@ -1,0 +1,11 @@
+{
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile",
+    "watchPatterns": ["backup/**"]
+  },
+  "deploy": {
+    "cronSchedule": "0 6 * * *",
+    "restartPolicyType": "NEVER"
+  }
+}

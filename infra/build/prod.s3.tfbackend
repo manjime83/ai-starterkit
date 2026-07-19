@@ -1,0 +1,2 @@
+# Change the key per project — production state
+key = "ai-starterkit/prod/terraform.tfstate"

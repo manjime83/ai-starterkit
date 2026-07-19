@@ -134,26 +134,32 @@ export default defineConfig([
 
 ## Step 6 — Environment Variables
 
-Write this template to a committed `.env.example`, then `cp .env.example .env` and fill in real values:
+Write this template to a committed `.env.example`, then `cp .env.example .env` and replace the placeholders with
+real values. The placeholders are **syntactically valid on purpose** — they pass `lib/env.ts` validation so the
+app builds anywhere (CI copies this file verbatim, Step 35), but nothing works against real services until
+replaced:
 
 ```env
+# Copy to .env and replace the placeholder values with real credentials.
+# Placeholders are syntactically valid so the app builds (CI copies this file verbatim),
+# but nothing works against real services until replaced.
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app" # compose.yaml default; override in production
-BETTER_AUTH_SECRET="" # generate: openssl rand -base64 32
+BETTER_AUTH_SECRET="00000000000000000000000000000000" # placeholder — generate: openssl rand -base64 32
 BETTER_AUTH_URL="http://localhost:3000"
-GOOGLE_CLIENT_ID=""
-GOOGLE_CLIENT_SECRET=""
+GOOGLE_CLIENT_ID="placeholder"
+GOOGLE_CLIENT_SECRET="placeholder"
 
-# Email — Amazon SES, with its own IAM user (ses:SendEmail only).
-EMAIL_FROM="" # must be a verified SES identity (address or domain)
+# Email — Amazon SES. SES_* holds the app IAM user's key pair (infra/, Step 36).
+EMAIL_FROM="dev@example.com" # must be a verified SES identity (address or domain)
 SES_REGION="us-east-1"
-SES_ACCESS_KEY_ID=""
-SES_SECRET_ACCESS_KEY=""
+SES_ACCESS_KEY_ID="placeholder"
+SES_SECRET_ACCESS_KEY="placeholder"
 
-# Object storage — the uploads bucket from infra/ (Step 36), with its own IAM user.
+# Object storage — the uploads bucket from infra/ (Step 36). BUCKET_* holds the same app user's key pair.
 BUCKET_REGION="us-east-1"
-BUCKET_ACCESS_KEY_ID=""
-BUCKET_SECRET_ACCESS_KEY=""
-BUCKET_NAME=""
+BUCKET_ACCESS_KEY_ID="placeholder"
+BUCKET_SECRET_ACCESS_KEY="placeholder"
+BUCKET_NAME="placeholder"
 # Leave both blank for AWS S3. Set them to point at another S3-compatible host.
 BUCKET_ENDPOINT=""
 BUCKET_FORCE_PATH_STYLE="" # "true" for hosts that address buckets by path instead of subdomain
@@ -168,7 +174,8 @@ STRIPE_PRICE_ID=""
 ```
 
 > Everything except the Stripe and cron block is required. Empty strings count as **unset** (Step 7).
-> SES and the uploads bucket each get their **own IAM user and key pair** (Step 36).
+> The `SES_*` and `BUCKET_*` pairs both hold the **single app IAM user's** credentials (Step 36); they stay
+> separate variables so the user can be split later without touching app code.
 > Locally, `docker compose up -d` (Step 8) provides Postgres. Storage and email use real AWS in every environment.
 
 ## Step 7 — lib/env.ts (t3-env)
@@ -216,13 +223,9 @@ Set `emptyStringAsUndefined` on the `createEnv` call:
 
 ```ts
 export const env = createEnv({
-  server: {
-    /* schema above */
-  },
+  server: {/* schema above */},
   client: {},
-  runtimeEnv: {
-    /* list every var explicitly: DATABASE_URL: process.env.DATABASE_URL, ... */
-  },
+  runtimeEnv: {/* list every var explicitly: DATABASE_URL: process.env.DATABASE_URL, ... */},
   emptyStringAsUndefined: true,
 });
 
@@ -245,7 +248,7 @@ if (typeof window === "undefined") {
 One service for local development. Compose reads `./.env` automatically for `${VAR}` interpolation, and all state
 lives under `./.data` (add `/.data` to `.gitignore`).
 
-- **postgres** — `postgres:18-alpine` on port 5432, data mounted at `./.data/postgres:/var/lib/postgresql`.
+- **postgres** — `postgres:18` on port 5432, data mounted at `./.data/postgres:/var/lib/postgresql`.
   Credentials interpolate with overridable defaults — `${POSTGRES_USER:-postgres}`,
   `${POSTGRES_PASSWORD:-postgres}`, `${POSTGRES_DB:-app}` — plus a `pg_isready` healthcheck.
 
@@ -254,8 +257,8 @@ Start with `docker compose up -d`; the `.env.example` `DATABASE_URL` default alr
 > **Pin the major version — never `postgres:latest`.** This tag must match the backup container's base image
 > (Step 37) and the Railway Postgres service; `pg_dump` refuses to dump a server newer than itself. Bump all three
 > together.
-> There is no local S3 emulator or mail catcher. Use the dev bucket the Terraform `default` workspace provisions
-> (`<project>-dev-uploads`, Step 36).
+> There is no local S3 emulator or mail catcher. Use the dev bucket Terraform's dev environment provisions
+> (`<project>-dev-uploads`, `build/dev.tfvars`, Step 36).
 
 ## Step 9 — next.config.ts
 
@@ -287,13 +290,12 @@ features/          ← one folder per product feature
     schemas.ts     ← shared Zod schemas (used by both actions and forms)
   subscriptions/   ← billing UI (always present when Stripe is enabled)
     components/    ← checkout and billing-portal controls
-domain/            ← shared business rules and queries with no UI/framework dependency
-  subscriptions.ts ← getSubscription + isSubscribed queries
 components/ui/     ← shadcn components
 hooks/             ← shared React hooks (use-mobile from shadcn)
 db/                ← Drizzle schema, client, seed
 emails/            ← react-email templates
-lib/               ← env (t3-env), auth (+ verifySession), auth-client, constants, email, storage, safe-action, utils
+lib/               ← env (t3-env), auth (+ verifySession), auth-client, constants, email, storage, safe-action,
+                     subscriptions (getSubscription + isSubscribed), utils
 scripts/           ← smoke test (test.ts)
 proxy.ts           ← Next.js proxy: redirects unauthenticated /dashboard traffic to /sign-in
 app/               ← Next.js App Router (routing only — no business logic)
@@ -312,12 +314,11 @@ app/               ← Next.js App Router (routing only — no business logic)
 
 **Rules:**
 
-- `domain/` may import from `db/` and other domain modules, but never from `app/`, `features/`, `components/`, or
-  `lib/`. It owns business rules shared by framework infrastructure and product features.
-- `lib/` may import from `domain/` and `db/`; this keeps infrastructure such as action middleware from depending on
-  a feature slice.
-- `features/` may import from `domain/`, `lib/`, `db/`, and `components/ui/` — but never from other features.
-- `app/` route segments import from `features/`, `domain/`, and `lib/auth` for session checks.
+- `lib/` may import from `db/` and other `lib/` modules, but never from `app/`, `features/`, or `components/`.
+  Shared business-rule queries (e.g. `lib/subscriptions.ts`) live here so infrastructure such as action middleware
+  never depends on a feature slice.
+- `features/` may import from `lib/`, `db/`, and `components/ui/` — but never from other features.
+- `app/` route segments import from `features/`, `lib/auth` for session checks, and other `lib/` modules.
 - Adding a feature: create `features/<name>/` with only the pieces it needs.
 - **No barrel files** — import directly from the defining file (`@/features/todos/data`,
   `@/features/todos/components/todo-form`).
@@ -535,7 +536,8 @@ await authClient.subscription.billingPortal({
 
 The template assumes a freemium model: users access the app for free and optionally upgrade to Pro.
 
-**`domain/subscriptions.ts`** — query subscription status:
+**`lib/subscriptions.ts`** — query subscription status (kept in `lib/`, next to the auth infrastructure that owns
+the `subscriptions` table, so action middleware never imports from a feature slice):
 
 ```ts
 // The Stripe plugin keeps `subscriptions` in sync; `referenceId` (not userId) holds the user id.
@@ -557,7 +559,7 @@ export async function isSubscribed(userId: string) {
 **`lib/safe-action.ts`** — action clients with an `ActionError` class for user-facing error messages:
 
 ```ts
-import { getSubscription } from "@/domain/subscriptions";
+import { getSubscription } from "@/lib/subscriptions";
 import { createSafeActionClient, DEFAULT_SERVER_ERROR_MESSAGE } from "next-safe-action";
 
 export class ActionError extends Error {}
@@ -835,7 +837,7 @@ folder is a user who cannot sign in. Terraform provisions none of this — do it
 3. **Choose the MAIL FROM setup deliberately.** SES's default `amazonses.com` MAIL FROM domain already passes SPF;
    do not add `include:amazonses.com` to the visible From domain just because SES sends the message. If you want SPF
    alignment with your domain, configure a **custom MAIL FROM subdomain** in SES (for example,
-   `mail.<production_domain>`) and publish the exact MX and SPF records SES provides on that subdomain. If that
+   `mail.<your-domain>`) and publish the exact MX and SPF records SES provides on that subdomain. If that
    subdomain already has an SPF record, merge the SES include into it; two SPF records on the same name is a hard
    fail, not a merge.
 4. **Publish a DMARC record** — `TXT` at `_dmarc.<domain>`, starting at `v=DMARC1; p=none; rua=mailto:...`. Observe
@@ -872,7 +874,7 @@ backend route.
 > To swap AWS S3 for another provider, set `BUCKET_ENDPOINT` and `BUCKET_FORCE_PATH_STYLE=true` if it addresses
 > buckets by path. Confirm that the provider preserves signed PUT headers and supports `HeadObject`; the finalization
 > check remains mandatory. When the uploads bucket moves away from AWS, the uploads resources in `infra/` become
-> unnecessary, but keep the SES user and backups bucket (Step 36).
+> unnecessary, but keep the app user's SES policy and the backups bucket (Step 36).
 
 ## Step 30 — `app/api/health/route.ts`
 
@@ -937,8 +939,8 @@ Also pin the package manager in the same file — `corepack enable && corepack u
 ```
 
 > `db:seed` is empty by default. `postlint` runs `tsc --noEmit` automatically after every lint run.
-> `packageManager` is the single source of truth for the pnpm version — CI reads it (Step 35), Corepack enforces it
-> locally.
+> `packageManager` pins the exact pnpm version Corepack enforces locally; CI pins the major separately
+> (`version: 11`, Step 35) and the action cross-checks the two, so bump them together.
 > `stripe:dev` requires `stripe login` once. Railpack handles the production build and container startup — no
 > Railway-specific build/start scripts.
 
@@ -968,107 +970,115 @@ pnpm lint
 
 ## Step 35 — GitHub Actions CI (`.github/workflows/ci.yml`)
 
-One `checks` job on both `push` and `pull_request`, with `permissions: { contents: read }`, six steps:
+One `checks` job on both `push` and `pull_request`, with `permissions: { contents: read }`, seven steps:
 
 1. `actions/checkout@v7`
-2. `pnpm/action-setup@v6` with **no `version` input** — it reads the pnpm version from `packageManager`.
-3. `actions/setup-node@v6` with `node-version: 24` and `cache: pnpm` (pnpm must be set up first for the cache).
-4. `pnpm install --frozen-lockfile` — CI fails on lockfile drift instead of silently updating it.
-5. `pnpm lint`.
-6. `pnpm build`.
+2. `cp .env.example .env` — the committed placeholders are the CI environment. Do **not** define job-level `env:`
+   placeholders; `.env.example` is the single source (Step 6).
+3. `pnpm/action-setup@v6` with `version: 11` — pin the major explicitly instead of reading `packageManager`.
+   The action still cross-checks the range against `packageManager`, so a major bump must update both.
+4. `actions/setup-node@v6` with `node-version: 24` and `cache: pnpm` (pnpm must be set up first for the cache).
+5. `pnpm install --frozen-lockfile` — CI fails on lockfile drift instead of silently updating it.
+6. `pnpm lint`.
+7. `pnpm build`.
 
 > No separate `pnpm format:check` step: `pnpm lint` already covers ESLint + Prettier-as-a-lint-rule + `tsc --noEmit`.
 > **`node-version: 24` pins CI only, and is not authoritative.** There is deliberately no `engines` field and no
 > `.nvmrc`; add `engines` per project if the drift ever bites.
-> `next build` validates the production compilation path before merge, so the job needs non-secret, syntactically
-> valid placeholder environment variables. Define job-level values for every required variable: a local-format
-> `DATABASE_URL`, a 32+ character `BETTER_AUTH_SECRET`, `http://localhost:3000` for `BETTER_AUTH_URL`, placeholder
-> Google/AWS credentials, `ci@example.com` for `EMAIL_FROM`, `us-east-1` for both regions, and `ci` for
-> `BUCKET_NAME`. Leave Stripe and cron variables unset. The build must not contact Postgres, SES, or S3; these values
-> exist only because `lib/env.ts` validates configuration while modules are compiled.
+> `next build` validates the production compilation path before merge; Next.js loads `.env` at build time, which is
+> why the copied placeholders satisfy `lib/env.ts` while modules are compiled. Stripe and cron variables stay blank
+> (= unset). The build must not contact Postgres, SES, or S3.
 > Keep `actions/checkout@v7`; it is the current action generation used by this guide.
-
-```yaml
-env:
-  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/app
-  BETTER_AUTH_SECRET: "00000000000000000000000000000000"
-  BETTER_AUTH_URL: http://localhost:3000
-  GOOGLE_CLIENT_ID: ci
-  GOOGLE_CLIENT_SECRET: ci
-  EMAIL_FROM: ci@example.com
-  SES_REGION: us-east-1
-  SES_ACCESS_KEY_ID: ci
-  SES_SECRET_ACCESS_KEY: ci
-  BUCKET_REGION: us-east-1
-  BUCKET_ACCESS_KEY_ID: ci
-  BUCKET_SECRET_ACCESS_KEY: ci
-  BUCKET_NAME: ci
-```
 
 ## Step 36 — AWS Infrastructure (`infra/`, Terraform)
 
 Terraform in `infra/` provisions everything a project needs on AWS, using the latest `terraform-aws-modules`
 (`s3-bucket` ~> 5.0; `iam` ~> 6.0 for both the `iam-user` and `iam-policy` submodules — no raw `aws_iam_policy`
-resources). Workspaces map to environments: `default` = dev (resources prefixed `<project>-dev`), `production` =
-production (prefixed `<project>`).
+resources). **No workspaces** — one root configuration; each environment is a file pair in `build/`:
 
-**Layout & conventions** (`main.tf`, `variables.tf`, `terraform.tfvars`, `outputs.tf`):
+```
+infra/
+  main.tf / variables.tf / outputs.tf   ← backend, provider, one module "stack" call
+  build/
+    dev.tfvars  + dev.s3.tfbackend      ← dev values (resources prefixed <project>-dev) + dev state key
+    prod.tfvars + prod.s3.tfbackend     ← prod values (prefixed <project>) + prod state key
+  modules/
+    stack/                              ← app resources: uploads bucket, app user + policies
+    backups/                            ← backups bucket + upload-only user (instantiated only in prod)
+```
 
-- S3 backend (`nimbusit-terraform-state`, `use_lockfile`) — change the state `key` per project. The bucket name is
-  **intentionally org-specific**: an existing bucket in this AWS account, created once and shared by every project.
-  Forking this kit into another org means pointing the backend at your own state bucket.
+The backend-config file holds that environment's state `key`, which is what keeps the two environments in
+separate state files — never apply one environment's tfvars against the other's state.
+
+**Layout & conventions**:
+
+- S3 backend (`nimbusit-terraform-state`, `use_lockfile`) with **no `key` in the backend block** — the key comes
+  from `terraform init -backend-config=build/<env>.s3.tfbackend`; change it per project in both files. The bucket
+  name is **intentionally org-specific**: an existing bucket in this AWS account, created once and shared by every
+  project. Forking this kit into another org means pointing the backend at your own state bucket.
 - Single AWS provider in `us-east-1` with `default_tags` of `Project` + `Environment`.
-- Variables: `project_name`, `production_domain`, and `production_app_origins`. `production_domain` is the bare
-  email domain used to scope SES sending. `production_app_origins` is a non-empty list of complete HTTPS origins
-  with no trailing slash (for example, `https://app.example.com` or a Railway-generated origin) used only for S3
-  CORS. Validate every value and keep both concerns separate; never derive the app origin by prepending `www`.
-  `terraform.tfvars` holds per-project values — edit after cloning.
-- Locals: `environment` from `terraform.workspace`, `prefix` as described above.
+- Variables: `environment` (the root validates `dev` | `prod`), `project_name` (root-validated slug),
+  `ses_from_email`, and `bucket_allowed_origins`. `ses_from_email` is the full From address the app sends as
+  (e.g. `no-reply@example.com`) — SES sending is scoped to exactly this address. `bucket_allowed_origins` is a non-empty
+  list of complete origins with no trailing slash used only for S3 CORS — **always set explicitly per
+  environment**: `["http://localhost:3000"]` in dev, the real `https://` origins (for example,
+  `https://app.example.com` or a Railway-generated origin) in prod. No environment conditional picks origins; the
+  tfvars are the single source. Never derive the app origin by prepending `www`. The two `build/*.tfvars` files
+  hold per-project values — edit after cloning.
+- The root derives `local.prefix` (`<project>` in prod, `<project>-dev` otherwise) and passes **only `prefix`** to
+  the modules — neither module receives `environment` or `project_name`; the modules validate their own inputs
+  (`ses_from_email`, `bucket_allowed_origins`).
 
-**Application resources** (`app.tf`):
+**Application resources** (`modules/stack`):
 
 - **Uploads bucket** (`<prefix>-uploads`, s3-bucket module): private, with `attach_require_latest_tls_policy` +
   `attach_deny_insecure_transport_policy`, and a CORS rule allowing `GET`/`PUT` with `Content-Type` and
-  `Content-Disposition` from `http://localhost:3000` (dev) or every value in `production_app_origins` (production)
-  — required for the browser's direct presigned PUT/download flow.
-- **Storage user** (`<prefix>-storage`, iam-user module, no login profile) with one policy via the iam-policy
-  module (documents authored as `data.aws_iam_policy_document`): `<prefix>-storage-s3-access` with two statements:
-  `s3:ListBucket` + `s3:GetBucketLocation` on the bucket ARN, and `s3:GetObject` + `s3:PutObject` +
-  `s3:DeleteObject` on the bucket's object ARN (`/*`). Do not grant `s3:*` or bucket-administration actions.
-- **SES user** (`<prefix>-ses`, no login profile) with one policy: `<prefix>-ses-send` — `ses:SendEmail` on `*`,
-  conditioned to `ses:FromAddress` matching `*@<production_domain>`. The app does not send raw email, so it does
-  not need `ses:SendRawEmail`.
+  `Content-Disposition` from every value in `bucket_allowed_origins` — required for the browser's direct presigned
+  PUT/download flow.
+- **App user** (`<prefix>-app`, iam-user module, no login profile) — a **single IAM user** carrying both app
+  policies via the iam-policy module (documents authored as `data.aws_iam_policy_document`):
+  - `<prefix>-storage-s3-access` with two statements: `s3:ListBucket` + `s3:GetBucketLocation` on the bucket ARN,
+    and `s3:GetObject` + `s3:PutObject` + `s3:DeleteObject` on the bucket's object ARN (`/*`). Do not grant `s3:*`
+    or bucket-administration actions.
+  - `<prefix>-ses-send` — `ses:SendEmail` on `*`, conditioned (`StringEquals`) to `ses:FromAddress` being exactly
+    `<ses_from_email>`. The app does not send raw email, so it does not need `ses:SendRawEmail`.
 
-**Backup resources** (`backups.tf`, created only when `environment == "production"` via `count`):
+  Its key pair fills both the `SES_*` and `BUCKET_*` env pairs (Step 6).
 
-- **Backups bucket** (`<prefix>-database-backups`): versioned, AES256 server-side encryption, TLS policies as
-  above, and a lifecycle rule — current versions expire after 30 days, noncurrent after 1 day. Each backup is a
-  uniquely named object, so this is the retention mechanism; the backup container never deletes.
+**Backup resources** (`modules/backups` — a separate module; the root instantiates it with
+`count = var.environment == "prod" ? 1 : 0`, so no per-resource conditionals inside):
+
+- **Backups bucket** (`<prefix>-database-backups`): unversioned, AES256 server-side encryption, TLS policies as
+  above, and a lifecycle rule expiring objects after 30 days. Each backup is a uniquely named object, so this is
+  the retention mechanism; the backup container never deletes.
 - **Backup user** (`<prefix>-database-backup`, no login profile) with a single policy allowing only `s3:PutObject`
   on the backups bucket's objects.
 
-**Outputs**: `aws_region`, `bucket_id`, storage user `bucket_access_key_id` / `bucket_secret_access_key`
-(sensitive), SES user `ses_access_key_id` / `ses_secret_access_key` (sensitive), `ses_from_email`
-(`no-reply@<production_domain>`), and the production-only `backups_bucket_id` / `backup_user_access_key_id` /
-`backup_user_access_key_secret` (null in dev).
+**Outputs**: `aws_region`, `bucket_id`, app user `app_access_key_id` / `app_secret_access_key` (sensitive),
+`ses_from_email` (echoes the input), and the production-only `backups_bucket_id` /
+`backup_user_access_key_id` / `backup_user_access_key_secret` (null in dev).
 
-Add to `.gitignore`: `infra/.terraform/`, `*.tfstate*`, `.env.infra` — and **commit** `infra/.terraform.lock.hcl`.
+Add to `.gitignore`: `**/.terraform/`, `*.tfstate*`, `.env.infra` — and **commit** `infra/.terraform.lock.hcl`
+plus the `build/` tfvars and tfbackend files (they hold no secrets).
 
 **`infra/README.md`** documents the apply flow, explains that each production app origin must be listed exactly in
-`production_app_origins`, and includes a quick script that writes the app outputs to `../.env.infra` for copying
-into `.env`.
+`bucket_allowed_origins`, and includes a quick script (`write-env.sh`) that writes the app outputs to
+`../.env.infra` for copying into `.env`.
 
-> `terraform init && terraform apply` for dev; `terraform workspace new production && terraform apply` for
-> production. SES **verification** is not provisioned — verify the domain in the SES console (Step 28).
+> Apply per environment:
+> `terraform init -backend-config=build/dev.s3.tfbackend && terraform apply -var-file=build/dev.tfvars` for dev;
+> same with the `prod` pair (plus `init -reconfigure`) for production. Switching environments in the same checkout
+> always requires `init -reconfigure` — the state file is fixed at init time. SES **verification** is not
+> provisioned — verify the domain in the SES console (Step 28).
 
 ## Step 37 — Database backup service (`backup/`)
 
 A minimal Railway cron container: dump the database, upload to S3, exit. Retention is the backups bucket's
 lifecycle rule (Step 36) — the container only ever uploads, never lists or deletes.
 
-- **`Dockerfile`** — `FROM postgres:18-alpine` (pg_dump must match the server's major version — the same tag as
-  `compose.yaml`, Step 8) plus `apk add aws-cli`; copies in `backup.sh` as the entrypoint.
-- **`backup.sh`** (`#!/bin/ash` + `set -euo pipefail`; requires `DATABASE_URL` and `BACKUP_BUCKET`): create a temp
+- **`Dockerfile`** — `FROM postgres:18` (pg_dump must match the server's major version — the same tag as
+  `compose.yaml`, Step 8) plus `apt-get install awscli`; copies in `backup.sh` as the entrypoint.
+- **`backup.sh`** (`#!/bin/bash` + `set -euo pipefail`; requires `DATABASE_URL` and `BACKUP_BUCKET`): create a temp
   file with `mktemp`, register an `EXIT` trap to remove it, then run
   `pg_dump --format=custom --no-owner --no-privileges --file="$dump_file" "$DATABASE_URL"`. Validate the archive
   with `pg_restore --list "$dump_file" >/dev/null`, then `aws s3 cp` it to
@@ -1106,8 +1116,9 @@ Railpack auto-detects Next.js and handles the production build and startup. `rai
 1. Create a Railway project and deploy this repository from GitHub or with `railway up`.
 2. Add a PostgreSQL service and reference its `DATABASE_URL` from the app service.
 3. Generate a public app domain (Railway-generated or custom), then set `BETTER_AUTH_URL` to that exact origin.
-4. Put the same origin in Terraform's `production_app_origins` list and apply the production workspace so S3 CORS
-   accepts browser uploads. Add every additional production origin explicitly; no `www` hostname is assumed.
+4. Put the same origin in the `bucket_allowed_origins` list in `infra/build/prod.tfvars` and re-apply the production
+   environment so S3 CORS accepts browser uploads. Add every additional production origin explicitly; no `www`
+   hostname is assumed.
 5. Configure Google OAuth with `<BETTER_AUTH_URL>/api/auth/callback/google`.
 
 **Required app service variables:** `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`,
@@ -1118,7 +1129,8 @@ Railpack auto-detects Next.js and handles the production build and startup. `rai
 (leave all three blank to disable billing, or set all three); plus `BUCKET_ENDPOINT` / `BUCKET_FORCE_PATH_STYLE` for
 non-AWS S3-compatible hosts.
 
-The two AWS key pairs come from the Terraform outputs in Step 36. If you'd rather use a Railway bucket than AWS S3,
+The `SES_*` and `BUCKET_*` pairs both hold the app user's key pair from the Terraform outputs in Step 36. If you'd
+rather use a Railway bucket than AWS S3,
 confirm that its current S3 API supports signed PUT headers and `HeadObject`, then take its credentials from the
 bucket service and set `BUCKET_ENDPOINT` (plus `BUCKET_FORCE_PATH_STYLE=true`) alongside them. For local
 development, link the project with the Railway CLI and run commands through `railway run`, which injects the same
@@ -1185,8 +1197,9 @@ pnpm dlx skills add next-safe-action/skills
 | **better-auth**      | Library conventions, safe patterns, plugin setup (6 packs: best-practices, security, email/password, org, 2FA)   |
 | **next-safe-action** | Client creation, middleware, hooks, forms, error handling, better-auth + TanStack Query integrations (9 packs)   |
 
-> Skills install into `.agents/` and are auto-discovered by Claude Code. `.agents/` is gitignored — run the
-> installs once per project instead of committing the packs, then restart Claude Code.
+> Run the installs from the **repo root**. Skills install into `.agents/`, and the installer creates `.claude/`
+> with symlinks into `.agents/skills/` so Claude Code auto-discovers them. Both `.agents/` and `.claude/` are
+> gitignored — run the installs once per project instead of committing the packs, then restart Claude Code.
 
 ---
 

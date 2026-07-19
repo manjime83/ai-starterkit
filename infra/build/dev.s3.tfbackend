@@ -1,0 +1,2 @@
+# Change the key per project — dev state
+key = "ai-starterkit/dev/terraform.tfstate"
